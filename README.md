@@ -1,0 +1,289 @@
+# BRILink Sentiment Intelligence Platform
+
+Pipeline data engineering end-to-end yang memantau persepsi publik terhadap
+**BRILink** — jaringan agen laku pandai BRI dengan 1,18 juta agen di 66.450
+desa — dari berita nasional, ulasan aplikasi, dan percakapan media sosial;
+menilainya dengan mesin sentimen ensemble multi-sinyal; lalu menyajikannya
+sebagai dashboard Metabase interaktif yang di-provision otomatis.
+
+> **Bukan cocok-cocokan kata kunci.** Setiap label dihasilkan oleh model
+> IndoBERT (bukan leksikon manual) dikombinasikan dengan tiga sinyal lain —
+> lengkap dengan skor keyakinan dan probabilitas per kelas yang bisa
+> ditelusuri sampai ke dokumen aslinya.
+> Detail lengkap: [`docs/SENTIMENT_METHODOLOGY.md`](docs/SENTIMENT_METHODOLOGY.md)
+
+---
+
+## Mulai dalam 3 perintah
+
+```bash
+cp .env.example .env
+make up       # Postgres · Redis · Airflow · Metabase
+make demo     # ingest → validasi → skoring → dbt → dashboard
+```
+
+Tanpa `make` (PowerShell / Git Bash):
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose --profile tools run --rm --build pipeline-runner
+```
+
+Image aplikasi di-build lokal dan tidak pernah dipublikasikan ke registry mana
+pun, jadi `--build` (atau `pull_policy: build` yang sudah disetel di
+`docker-compose.yml`) diperlukan agar Compose tidak mencoba menariknya dari
+Docker Hub.
+
+| Layanan | URL | Kredensial |
+|---|---|---|
+| Metabase | http://localhost:3000 | `admin@brilink.local` / `BrilinkDemo123!` |
+| Airflow | http://localhost:8080 | `admin` / `admin` |
+
+Tanpa API key sama sekali pun dashboard akan terisi: konektor yang butuh
+kredensial menonaktifkan diri dengan rapi, dan generator korpus sintetis
+deterministik mengisi warehouse agar demo tidak pernah kosong. Baris sintetis
+selalu ditandai `is_synthetic` dan bisa difilter di setiap mart.
+
+Butuh build cepat/ringan? `make build-light` melewati torch dan transformers
+(~2 GB lebih kecil) untuk uji coba struktur pipeline saja — skoring sentimen
+akan sangat terdegradasi (cuma rating bintang) karena tidak ada lagi jalur
+leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
+
+---
+
+## Tumpukan teknologi
+
+| Lapisan | Teknologi | Perannya di sini |
+|---|---|---|
+| Ingestion | `feedparser`, `google-play-scraper`, `praw`, YouTube Data API, X API v2 | 7 konektor, satu envelope dokumen |
+| State & politeness | Redis | cooldown, checkpoint inkremental, circuit breaker |
+| Warehouse | PostgreSQL 16 | skema `raw` / `core` / `ops` |
+| Kualitas data | Great Expectations 1.x | gerbang yang memblokir, hasilnya dipersistensi |
+| NLP | IndoBERT + model emosi | ensemble 4 sinyal + ABSA 8 aspek |
+| Transformasi | dbt 1.8 | 5 staging · 2 intermediate · 9 mart · 79 test, tanpa paket eksternal |
+| Orkestrasi | Airflow 2.9 | TaskGroup, kegagalan terisolasi, retry eksponensial |
+| BI | Metabase | 19 kartu, di-provision lewat API sebagai kode |
+| Delivery | Docker Compose, GitHub Actions | 5 job CI termasuk uji warehouse sungguhan |
+
+---
+
+## Sumber data
+
+| Konektor | Platform | Kredensial | Catatan |
+|---|---|---|---|
+| `rss` | Berita | — | Google News RSS per keyword + 10 feed redaksi langsung |
+| `playstore` | Ulasan | — | BRImo & BRILink Mobile, membawa rating bintang |
+| `appstore` | Ulasan | — | storefront Indonesia |
+| `reddit` | Sosial | client id/secret | r/indonesia, r/finansial + komentarnya |
+| `youtube` | Sosial | API key | komentar pada video BRILink |
+| `twitter` | Sosial | bearer token | pencarian recent, bahasa Indonesia |
+| `seed` | — | — | korpus sintetis deterministik (fallback demo) |
+
+Rating bintang dari app store dipakai ganda: sebagai sinyal di dalam ensemble,
+**dan** sebagai supervisi lemah untuk mengukur akurasi mesin tanpa perlu
+dataset berlabel manual.
+
+---
+
+## Yang membuat mesin sentimennya berbeda
+
+| Kalimat | Pendekatan naif (hitung kata) | Target label |
+|---|---|---|
+| "Tidak bagus sama sekali" | positif ❌ | **negatif** |
+| "Aplikasinya tidak buruk kok" | negatif ❌ | **positif** |
+| "Ramah, tapi biayanya mahal banget" | netral ❌ | **negatif** |
+| "Mantap banget, uang saya hilang wkwk" | positif ❌ | **negatif** |
+| "BRI membantah tuduhan penipuan" | sangat negatif ❌ | **netral** |
+| "Kalau biayanya mahal saya pindah" | negatif ❌ | **netral/positif** |
+| "Aplikasinya lemooot bgt, gk bisa transfer" | netral ❌ | **negatif** |
+
+Kasus-kasus ini (negasi, sarkasme, kontras, kalimat bantahan, kondisional) ada
+di `tests/gold_cases.py` sebagai gold set, dinilai oleh IndoBERT — bukan
+dijamin benar lewat aturan manual seperti pendekatan leksikon lama. Angka
+akurasi terkini ada di laporan `make bench`, dan regresinya ditegakkan oleh
+job `nlp-benchmark` di CI (lihat `docs/SENTIMENT_METHODOLOGY.md` §7).
+
+```bash
+make bench   # laporan akurasi per-kasus (butuh torch/transformers)
+```
+
+### Empat sinyal, bobot dinormalisasi ulang
+
+```
+IndoBERT                 0.55   konteks & framing implisit, chunking sliding-window
+klasifikasi emosi        0.15   intensitas afektif pada UGC
+rating bintang           0.18   ground truth lemah pada ulasan aplikasi
+konsensus antar-aspek    0.12   menghargai kekhususan, skor juga dari IndoBERT
+```
+
+Model yang gagal dimuat **tidak** mematikan pipeline — bobotnya dinormalisasi
+ulang ke sinyal yang tersedia, dan `mart_engine_quality` mencatat penurunan
+cakupannya. Karena tidak ada lagi leksikon sebagai jaring pengaman, dokumen
+tanpa rating bintang yang kehilangan sinyal IndoBERT akan jatuh ke netral
+berkeyakinan rendah dan masuk antrean tinjauan — lihat
+`docs/SENTIMENT_METHODOLOGY.md` §8.
+
+### ABSA: delapan aspek bisnis
+
+`Biaya & Tarif` · `Jaringan & Sistem` · `Layanan Agen` ·
+`Dana & Penyelesaian Transaksi` · `Keamanan & Fraud` ·
+`Akses & Inklusi Keuangan` · `Kemitraan & Ekonomi Agen` · `Aplikasi Digital`
+
+```
+"Agennya ramah tapi sinyal sering gangguan"
+   layanan_agen    → +0.50  positif
+   jaringan_sistem → −0.44  negatif
+```
+
+Satu dokumen, dua vonis berlawanan — inilah yang membuat angka dashboard bisa
+ditindaklanjuti.
+
+### Keyakinan dan human-in-the-loop
+
+Dokumen ambigu **tidak dipaksa** diberi label. Ketika sinyal bertentangan atau
+buktinya tipis, dokumen masuk `mart_review_queue` dengan peringkat prioritas
+yang menggabungkan ketidakpastian, jangkauan, dan keparahan aspek. Adjudikasi
+manusia (`reviewed_label`) selalu menang atas label model di seluruh mart.
+
+---
+
+## Dashboard
+
+19 kartu, dibuat otomatis oleh `python -m brilink.serving.metabase_provision`:
+
+**KPI** — total dokumen · Net Sentiment Score 30 hari · porsi negatif · ukuran antrean tinjauan
+**Tren** — NSS harian + rolling 7 hari · komposisi label per kanal
+**Aspek** — peringkat NSS per aspek · tren mingguan per aspek · matriks aspek × kanal
+**Sumber** — scorecard 30 vs 90 hari dengan delta
+**Aksi** — peringatan dini berbasis z-score · antrean tinjauan manual
+**Kepercayaan** — kualitas mesin (kecocokan rating & gold set) · kesehatan pipeline & data quality
+**Drill-down** — feed dokumen lengkap dengan teks, label, keyakinan, frasa pemicu, dan aspek
+**Data quality (engineering)** — tren hasil gerbang kualitas · expectation paling sering gagal ·
+freshness ingestion per konektor · snapshot gate terakhir
+
+Spesifikasinya adalah kode (`src/brilink/serving/dashboard_spec.py`), bisa
+direview di pull request, dan provisioning-nya idempoten.
+
+---
+
+## Model data
+
+dbt project ini **tidak punya dependensi paket eksternal** — dua generic test
+yang dibutuhkan (`accepted_range`, `unique_combination_of_columns`) ditulis
+lokal di `macros/generic_tests.sql`, sehingga build tidak pernah bergantung
+pada `hub.getdbt.com` (penting untuk CI dan deployment air-gapped).
+
+```
+raw.documents                    landing zone lintas-sumber, immutable
+raw.ingestion_runs               audit log per eksekusi konektor
+core.document_sentiment          skor + keyakinan + sinyal + penjelasan (JSONB)
+core.document_aspect_sentiment   ABSA, satu baris per (dokumen, aspek)
+core.dim_aspect                  katalog aspek
+ops.data_quality_results         hasil setiap expectation, per run
+      │
+      ▼ dbt
+staging/       5 view    penamaan, tipe, flag
+intermediate/  2 view    int_documents_scored ← satu grain kanonik
+marts/         9 tabel   siap dikonsumsi BI
+```
+
+Aturan *effective label* dan ambang keyakinan KPI didefinisikan **satu kali**
+di layer intermediate, sehingga mustahil ada dua mart yang saling bertentangan.
+
+---
+
+## Rekayasa kualitas
+
+| Lapisan | Cakupan |
+|---|---|
+| Unit test | normalisasi teks, ABSA, ensemble (via fake transformer), ingestion, state store |
+| Gold set | 20 kasus berlabel manual dengan ambang akurasi yang ditegakkan CI |
+| Great Expectations | 10 expectation sebagai gerbang keras sebelum scoring |
+| dbt test | 79 test: schema test plus 4 singular test yang merekonsiliasi mart dengan sumbernya |
+| CI | lint · unit · integrasi warehouse sungguhan (Postgres service) · benchmark gold set · build image |
+
+```bash
+make test     # suite unit
+make cov      # dengan laporan coverage
+make lint     # ruff + black + mypy
+make bench    # laporan akurasi gold set
+```
+
+---
+
+## Perintah yang tersedia
+
+```bash
+make help          # daftar lengkap
+make up / down     # jalankan / hentikan stack
+make demo          # pipeline sekali jalan, end-to-end
+make ingest CONNECTORS=rss,playstore
+make seed          # muat korpus sintetis
+make score         # skor dokumen yang belum dinilai
+make validate      # jalankan gerbang kualitas data
+make dbt           # dbt deps + run + test
+make dashboard     # provision ulang dashboard Metabase
+make clean         # hentikan stack dan hapus seluruh volume
+```
+
+---
+
+## Konfigurasi
+
+Semua diatur lewat environment variable dengan default yang sudah berfungsi
+(`src/brilink/settings.py`, contoh di `.env.example`).
+
+| Variabel | Default | Fungsi |
+|---|---|---|
+| `SENTIMENT_ENGINE_MODE` | `ensemble` | `ensemble` / `transformer_only` |
+| `SENTIMENT_NEUTRAL_BAND` | `0.12` | lebar pita netral |
+| `SENTIMENT_REVIEW_CONFIDENCE_THRESHOLD` | `0.55` | ambang antrean tinjauan |
+| `SENTIMENT_MODEL_VERSION` | `brilink-ensemble-v2.0.0` | naikkan untuk memicu re-score bersih |
+| `INGEST_CONNECTORS` | `all` | daftar konektor yang dijalankan |
+| `INGEST_COOLDOWN_MINUTES` | `90` | jeda minimum antar-run per konektor |
+| `INGEST_SEED_FALLBACK` | `true` | isi otomatis bila sumber live kosong |
+| `INSTALL_TORCH` (build arg) | `true` | `false` menghasilkan image ~2 GB lebih kecil |
+
+---
+
+## Dokumentasi
+
+| Dokumen | Isi |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | diagram alur, keputusan desain dan alasannya |
+| [`docs/SENTIMENT_METHODOLOGY.md`](docs/SENTIMENT_METHODOLOGY.md) | cara kerja mesin sentimen + batasannya |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | gejala → diagnosis → tindakan, dan prosedur rutin |
+
+---
+
+## Batasan
+
+Ditulis eksplisit karena angka tanpa konteks lebih berbahaya daripada tidak ada
+angka:
+
+- Volume pemberitaan mencerminkan agenda redaksi, **bukan** distribusi opini
+  masyarakat. NSS berita bukan hasil survei.
+- Ulasan aplikasi condong ke ekstrem — orang menulis saat sangat senang atau
+  sangat kesal.
+- Sarkasme hanya terdeteksi bila ada penanda eksplisit.
+- Aspek bersifat keyword-driven; keluhan tanpa kata kunci aspek tidak terpetakan.
+- Data sintetis ditandai `is_synthetic` dan tidak pernah dicampur diam-diam.
+
+Pakai dashboard ini sebagai **pengarah perhatian**, lalu verifikasi lewat kartu
+*Feed Dokumen* sampai ke teks aslinya.
+
+---
+
+## Sumber angka domain
+
+- [BRI catat jumlah BRILink capai 1,18 juta agen di 66.450 desa per Maret — ANTARA News](https://www.antaranews.com/berita/5554160/bri-catat-jumlah-brilink-capai-118-juta-agen-di-66450-desa-per-maret)
+- [1,18 Juta BRILink Agen Catat Transaksi Rp420 Triliun — Bloomberg Technoz](https://www.bloombergtechnoz.com/detail-news/108078/1-18-juta-brilink-agen-catat-transaksi-rp420-triliun)
+- [Risiko yang Harus Dihadapi Agen BRILink — merdeka.com](https://www.merdeka.com/jateng/resiko-yang-harus-dihadapi-agen-brilink-setiap-kali-transaksi-dari-gangguan-sinyal-internet-hingga-human-error-99918-mvk.html)
+- [5 Resiko Jadi Agen BRILink — Fastpay](https://www.fastpay.co.id/blog/resiko-jadi-agen-brilink.html)
+
+---
+
+## Lisensi
+
+MIT. Project portofolio; tidak berafiliasi dengan PT Bank Rakyat Indonesia (Persero) Tbk.

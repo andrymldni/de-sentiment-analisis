@@ -1,0 +1,9 @@
+-r base.txt
+feedparser
+google-play-scraper
+app-store-web-scraper
+praw
+google-api-python-client
+httpx
+beautifulsoup4
+lxml

@@ -1,0 +1,15 @@
+# DBT_PROFILES_DIR points here inside the Airflow image.
+brilink:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'postgres') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER', 'brilink') }}"
+      pass: "{{ env_var('POSTGRES_PASSWORD', 'brilink') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'brilinkdb') }}"
+      schema: analytics
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10

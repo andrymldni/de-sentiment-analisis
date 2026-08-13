@@ -1,0 +1,35 @@
+name: 'brilink'
+version: '2.0.0'
+config-version: 2
+profile: 'brilink'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # Documents below this confidence are excluded from headline KPIs but stay
+  # visible in the review-queue mart. Trust in a number is part of the number.
+  min_confidence_for_kpi: 0.45
+  # Synthetic demo rows are kept in the warehouse but flagged everywhere, so a
+  # viewer can never mistake generated data for observed data.
+  include_synthetic: true
+  rolling_window_days: 7
+
+models:
+  brilink:
+    +persist_docs:
+      relation: true
+      columns: true
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts

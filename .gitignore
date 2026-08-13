@@ -1,0 +1,39 @@
+# --- environment -----------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- python ----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# --- tooling caches ---------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- dbt artifacts ----------------------------------------------------
+dbt/brilink/target/
+dbt/brilink/logs/
+dbt/brilink/dbt_packages/
+dbt/brilink/.user.yml
+
+# --- airflow logs -------------------------------------------------------
+logs/
+
+# --- opencode (dev tooling) ---------------------------------------------
+.opencode/
+
+# --- OS / editors ------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install linters
+        run: pip install ruff black mypy
+      - name: ruff
+        run: ruff check src tests dags
+      - name: black
+        run: black --check src tests dags
+      - name: mypy
+        # Advisory only - mirrors `make lint` (mypy src --ignore-missing-imports || true).
+        run: mypy src --ignore-missing-imports || true
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements/dev.txt
+          pip install -e .
+      - name: Run unit suite
+        run: pytest -v
+
+  warehouse:
+    name: Warehouse integration (real Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: brilink
+          POSTGRES_PASSWORD: brilink
+          POSTGRES_DB: brilinkdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U brilink -d brilinkdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: brilinkdb
+      POSTGRES_USER: brilink
+      POSTGRES_PASSWORD: brilink
+      REDIS_ENABLED: "false"
+      SENTIMENT_ENABLE_TRANSFORMER: "false"
+      SENTIMENT_ENABLE_EMOTION: "false"
+      DBT_PROFILES_DIR: dbt/brilink
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements/dev.txt
+          pip install -r requirements/ingestion.txt
+          pip install -r requirements/quality.txt
+          pip install "dbt-core==1.8.7" "dbt-postgres==1.8.2"
+          pip install -e .
+      - name: Install postgres client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Apply warehouse schema
+        run: |
+          psql "postgresql://brilink:brilink@localhost:5432/brilinkdb" -v ON_ERROR_STOP=1 -f sql/001_schema.sql
+          psql "postgresql://brilink:brilink@localhost:5432/brilinkdb" -v ON_ERROR_STOP=1 -f sql/002_views.sql
+      - name: Ingest synthetic corpus
+        run: python -m brilink.ingestion.run_ingestion --connectors seed --force
+      - name: Data quality gate
+        run: python -m brilink.quality.validate --hours 168
+      - name: Sentiment scoring (structural - no torch)
+        run: python -m brilink.nlp.run_sentiment
+      - name: dbt run
+        run: cd dbt/brilink && dbt run --profiles-dir .
+      - name: dbt test
+        run: cd dbt/brilink && dbt test --profiles-dir .
+
+  nlp-benchmark:
+    name: Gold-set benchmark (IndoBERT)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements/nlp.txt -r requirements/dev.txt
+          pip install -e .
+      - name: Cache HuggingFace weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-cpu-${{ runner.os }}-${{ hashFiles('src/brilink/nlp/*.py') }}
+      - name: Run gold-set accuracy floor
+        env:
+          HF_HOME: ~/.cache/huggingface
+        run: pytest tests/test_gold_set.py -v
+
+  build:
+    name: Build application image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (structural check)
+        run: >
+          docker build
+          -f docker/Dockerfile.airflow
+          --build-arg INSTALL_TORCH=false
+          -t brilink/airflow:ci
+          .

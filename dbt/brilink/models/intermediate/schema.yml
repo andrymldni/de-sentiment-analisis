@@ -1,0 +1,34 @@
+version: 2
+
+models:
+  - name: int_documents_scored
+    description: >
+      Canonical one-row-per-scored-document grain. Enforces the effective-label
+      rule and the KPI confidence floor exactly once, so no downstream mart can
+      disagree with another.
+    columns:
+      - name: document_id
+        tests: [unique, not_null]
+      - name: effective_label
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['positive','neutral','negative']
+      - name: is_kpi_eligible
+        tests: [not_null]
+      - name: event_date
+        tests: [not_null]
+
+  - name: int_signal_contributions
+    description: "Long-format per-signal scores, enabling signal-level analysis in BI."
+    columns:
+      - name: signal_name
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['transformer','emotion','rating','aspect','llm_judge']
+      - name: signal_score
+        tests:
+          - accepted_range:
+              min_value: -1
+              max_value: 1

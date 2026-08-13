@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brilink-sentiment-platform"
+version = "2.0.0"
+description = "Multi-source BRILink sentiment intelligence pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires a live Postgres/Redis instance",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+# UP017: datetime.UTC is 3.11+ only; timezone.utc keeps tooling portable.
+# B905: zip(strict=) is applied where it matters, not mechanically.
+ignore = ["E501", "B008", "UP017", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"dags/*" = ["E402"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false

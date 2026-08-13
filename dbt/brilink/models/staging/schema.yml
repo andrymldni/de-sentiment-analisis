@@ -1,0 +1,95 @@
+version: 2
+
+models:
+  - name: stg_documents
+    description: "Typed, cleaned copy of raw.documents. One row per source document."
+    columns:
+      - name: document_id
+        description: "Surrogate key from the landing table."
+        tests: [unique, not_null]
+      - name: doc_uid
+        tests: [unique, not_null]
+      - name: source_platform
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['news','playstore','appstore','reddit','youtube','twitter','seed']
+      - name: event_at
+        description: "published_at, falling back to ingested_at when the source omits it."
+        tests: [not_null]
+      - name: text_length
+        tests:
+          - accepted_range:
+              min_value: 1
+      - name: is_synthetic
+        description: "TRUE for rows produced by the seed generator. Never mixed silently into KPIs."
+        tests: [not_null]
+
+  - name: stg_document_sentiment
+    description: "Ensemble output with the JSONB signal payload unpacked into typed columns."
+    columns:
+      - name: document_id
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('stg_documents')
+              field: document_id
+      - name: sentiment_label
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['positive','neutral','negative']
+      - name: effective_label
+        description: "Human adjudication when present, otherwise the model label."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['positive','neutral','negative']
+      - name: sentiment_score
+        tests:
+          - accepted_range:
+              min_value: -1
+              max_value: 1
+      - name: confidence
+        tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1
+      - name: agreement
+        tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1
+
+  - name: stg_document_aspects
+    description: "Aspect-based sentiment, one row per (document, aspect)."
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [document_id, aspect_code]
+    columns:
+      - name: aspect_code
+        tests: [not_null]
+      - name: aspect_score
+        tests:
+          - accepted_range:
+              min_value: -1
+              max_value: 1
+      - name: aspect_label_sentiment
+        tests:
+          - accepted_values:
+              values: ['positive','neutral','negative']
+
+  - name: stg_ingestion_runs
+    description: "Connector execution audit log."
+    columns:
+      - name: run_id
+        tests: [unique, not_null]
+      - name: connector
+        tests: [not_null]
+
+  - name: stg_data_quality
+    description: "Great Expectations outcomes, one row per expectation per run."
+    columns:
+      - name: expectation
+        tests: [not_null]

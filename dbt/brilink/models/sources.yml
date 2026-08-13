@@ -1,0 +1,79 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: "Immutable landing zone written by the ingestion connectors."
+    freshness:
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 48, period: hour}
+    loaded_at_field: ingested_at
+    tables:
+      - name: documents
+        description: "One row per source document across news, app stores and social platforms."
+        columns:
+          - name: document_id
+            description: "Surrogate key."
+            tests: [unique, not_null]
+          - name: doc_uid
+            description: "Deterministic idempotency key (platform + source + external id)."
+            tests: [unique, not_null]
+          - name: source_platform
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['news','playstore','appstore','reddit','youtube','twitter','seed']
+          - name: rating
+            description: "Star rating where the platform provides one."
+      - name: ingestion_runs
+        description: "One row per connector execution - the ingestion audit log."
+        loaded_at_field: started_at
+        columns:
+          - name: run_id
+            tests: [unique, not_null]
+          - name: connector
+            tests: [not_null]
+
+  - name: core
+    schema: core
+    description: "Sentiment engine output and conformed dimensions."
+    tables:
+      - name: document_sentiment
+        loaded_at_field: scored_at
+        columns:
+          - name: document_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  to: source('raw', 'documents')
+                  field: document_id
+          - name: sentiment_label
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['positive','neutral','negative']
+          - name: confidence
+            tests:
+              - accepted_range:
+                  min_value: 0
+                  max_value: 1
+      - name: document_aspect_sentiment
+        columns:
+          - name: aspect_code
+            tests:
+              - not_null
+              - relationships:
+                  to: source('core', 'dim_aspect')
+                  field: aspect_code
+      - name: dim_aspect
+        columns:
+          - name: aspect_code
+            tests: [unique, not_null]
+
+  - name: ops
+    schema: ops
+    description: "Operational metadata: data-quality outcomes."
+    tables:
+      - name: data_quality_results
+        loaded_at_field: checked_at

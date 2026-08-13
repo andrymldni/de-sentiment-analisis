@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1
+FROM apache/airflow:2.9.3-python3.11
+
+# ---------------------------------------------------------------------
+# System packages. postgresql-client is used by the maintenance DAG.
+# ---------------------------------------------------------------------
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        postgresql-client \
+        curl \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+# ---------------------------------------------------------------------
+# Python dependencies.
+#
+# Installed in layers from cheapest to most expensive so that editing the
+# application code does not invalidate the multi-GB torch layer. Torch is
+# pinned to the CPU wheel index: the GPU build is ~2.5 GB larger and this
+# workload is batch inference on short texts.
+# ---------------------------------------------------------------------
+COPY requirements/ /tmp/requirements/
+
+RUN pip install --no-cache-dir -r /tmp/requirements/base.txt \
+ && pip install --no-cache-dir -r /tmp/requirements/ingestion.txt \
+ && pip install --no-cache-dir -r /tmp/requirements/quality.txt \
+ && pip install --no-cache-dir dbt-core==1.8.7 dbt-postgres==1.8.2
+
+# Torch/transformers back IndoBERT, which is the engine's only source of
+# polarity for text without a star rating - there is no lexicon fallback.
+# Setting this to false is only useful for a fast structural smoke build
+# (image builds, dbt wiring); the sentiment stage will run heavily
+# signal-degraded (rating-only) until it's rebuilt with this true.
+ARG INSTALL_TORCH=true
+RUN if [ "$INSTALL_TORCH" = "true" ]; then \
+        pip install --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r /tmp/requirements/nlp.txt ; \
+    else \
+        echo "Skipping torch/transformers - sentiment scoring will be degraded (rating-only)" ; \
+        pip install --no-cache-dir emoji==2.14.0 numpy==1.26.4 ; \
+    fi
+
+# ---------------------------------------------------------------------
+# Optional: warm the model cache at build time so the first DAG run does
+# not pay the download cost (and so an air-gapped runtime still works).
+# ---------------------------------------------------------------------
+ARG PREFETCH_MODELS=false
+ENV HF_HOME=/opt/airflow/.cache/huggingface
+RUN if [ "$PREFETCH_MODELS" = "true" ] && [ "$INSTALL_TORCH" = "true" ]; then \
+        python -c "\
+from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
+m='mdhugol/indonesia-bert-sentiment-classification'; \
+AutoTokenizer.from_pretrained(m); AutoModelForSequenceClassification.from_pretrained(m)" || \
+        echo 'Model prefetch failed - it will be downloaded on first use instead' ; \
+    fi
+
+# ---------------------------------------------------------------------
+# Application code.
+# ---------------------------------------------------------------------
+COPY --chown=airflow:root pyproject.toml /opt/airflow/pyproject.toml
+COPY --chown=airflow:root src/ /opt/airflow/src/
+RUN pip install --no-cache-dir -e /opt/airflow
+
+ENV PYTHONPATH=/opt/airflow/src \
+    DBT_PROFILES_DIR=/opt/airflow/dbt/brilink \
+    PYTHONUNBUFFERED=1 \
+    TOKENIZERS_PARALLELISM=false
+
+WORKDIR /opt/airflow

@@ -1,0 +1,96 @@
+version: 2
+
+models:
+  - name: mart_sentiment_daily
+    description: "Daily Net Sentiment Score by platform and source, with a 7-day rolling view."
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [event_date, source_platform, source_name, is_synthetic]
+    columns:
+      - name: event_date
+        tests: [not_null]
+      - name: document_count
+        tests:
+          - not_null
+          - accepted_range:
+              min_value: 1
+      - name: net_sentiment_score
+        description: "(%positive - %negative) x 100. Range -100..100."
+        tests:
+          - accepted_range:
+              min_value: -100
+              max_value: 100
+
+  - name: mart_sentiment_by_source
+    description: "90-day source scorecard with a 30-day delta."
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [source_platform, source_name, is_synthetic]
+
+  - name: mart_aspect_daily
+    description: "Daily aspect-level sentiment - the actionable layer of the dashboard."
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [event_date, source_platform, is_synthetic, aspect_code]
+    columns:
+      - name: aspect_code
+        tests: [not_null]
+      - name: aspect_nss
+        tests:
+          - accepted_range:
+              min_value: -100
+              max_value: 100
+
+  - name: mart_aspect_source_matrix
+    description: "Aspect x platform heatmap for the trailing 90 days, with share of voice."
+    tests:
+      - unique_combination_of_columns:
+          combination_of_columns: [source_platform, aspect_code]
+
+  - name: mart_document_feed
+    description: "Wide drill-down feed: every scored document with its label, drivers and aspects."
+    columns:
+      - name: document_id
+        tests: [unique, not_null]
+      - name: sentiment_label
+        tests:
+          - accepted_values:
+              values: ['positive','neutral','negative']
+
+  - name: mart_review_queue
+    description: "Prioritised human-in-the-loop backlog."
+    columns:
+      - name: document_id
+        tests: [unique, not_null]
+      - name: review_priority
+        tests: [not_null]
+
+  - name: mart_engine_quality
+    description: >
+      Engine trustworthiness over time: agreement with star ratings, agreement
+      with the synthetic gold set, and per-signal availability.
+    columns:
+      - name: event_date
+        tests: [not_null]
+      - name: rating_agreement_rate
+        tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1
+              where: "rating_agreement_rate is not null"
+
+  - name: mart_pipeline_health
+    description: "Connector throughput, dedup effectiveness and data-quality gate history."
+
+  - name: mart_sentiment_alerts
+    description: "Z-score based deterioration alerts per aspect and platform."
+    columns:
+      - name: alert_status
+        tests:
+          - accepted_values:
+              values: ['insufficient_data','no_variance','deterioration_significant',
+                       'deterioration_watch','improvement_significant','stable']
+      - name: severity
+        tests:
+          - accepted_values:
+              values: ['high','medium','low']
