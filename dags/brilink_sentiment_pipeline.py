@@ -33,7 +33,7 @@ LOCAL_TZ = pendulum.timezone("Asia/Jakarta")
 DBT_DIR = "/opt/airflow/dbt/brilink"
 DBT_FLAGS = "--profiles-dir . --target dev"
 
-CONNECTORS = ["rss", "playstore", "appstore", "reddit", "youtube", "twitter"]
+CONNECTORS = ["rss", "expanded_rss", "web_scraper", "playstore", "appstore", "reddit", "youtube", "twitter", "kaskus", "google_trends", "google_maps"]
 
 DEFAULT_ARGS = {
     "owner": "data-engineering",

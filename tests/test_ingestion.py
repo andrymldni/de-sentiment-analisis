@@ -16,13 +16,27 @@ def store():
 def test_registry_exposes_every_connector():
     names = {c["name"] for c in catalog()}
     assert names == set(REGISTRY)
-    assert {"rss", "playstore", "reddit", "youtube", "twitter", "seed"} <= names
+    assert {
+        "rss",
+        "expanded_rss",
+        "web_scraper",
+        "playstore",
+        "reddit",
+        "youtube",
+        "twitter",
+        "kaskus",
+        "google_trends",
+        "google_maps",
+        "seed",
+    } <= names
 
 
 def test_resolve_all_excludes_the_seed_fallback():
     names = {c.name for c in resolve("all")}
     assert "seed" not in names
     assert "rss" in names
+    assert "kaskus" in names
+    assert "google_trends" in names
 
 
 def test_resolve_rejects_unknown_connectors():

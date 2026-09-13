@@ -121,6 +121,7 @@ class CredentialSettings(BaseSettings):
     reddit_user_agent: str = "brilink-sentiment/2.0"
     youtube_api_key: str | None = None
     twitter_bearer_token: str | None = None
+    google_maps_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
 

@@ -132,6 +132,18 @@ DIRECT_FEEDS: dict[str, str] = {
     "tempo": "https://rss.tempo.co/bisnis",
     "liputan6": "https://feed.liputan6.com/rss/bisnis",
     "republika": "https://republika.co.id/rss",
+    "bisnis": "https://www.bisnis.com/rss",
+    "kompas": "https://money.kompas.com/rss",
+    "detik": "https://finance.detik.com/rss",
+    "tribunnews": "https://www.tribunnews.com/rss",
+    "okezone": "https://economy.okezone.com/rss",
+    "merdeka": "https://www.merdeka.com/rss",
+    "suara": "https://www.suara.com/rss",
+    "jawa_pos": "https://www.jawapos.com/rss",
+    "sindonews": "https://www.sindonews.com/rss",
+    "idntimes": "https://www.idntimes.com/topic/feed",
+    "beritasatu": "https://www.beritasatu.com/rss/ekonomi",
+    "inilah_com": "https://www.inilah.com/rss/ekonomi",
 }
 
 

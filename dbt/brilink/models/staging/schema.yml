@@ -13,7 +13,7 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['news','playstore','appstore','reddit','youtube','twitter','seed']
+              values: ['news','playstore','appstore','reddit','youtube','twitter','kaskus','google_trends','google_maps','seed']
       - name: event_at
         description: "published_at, falling back to ingested_at when the source omits it."
         tests: [not_null]

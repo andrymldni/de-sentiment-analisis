@@ -56,7 +56,7 @@ leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
 
 | Lapisan | Teknologi | Perannya di sini |
 |---|---|---|
-| Ingestion | `feedparser`, `google-play-scraper`, `praw`, YouTube Data API, X API v2 | 7 konektor, satu envelope dokumen |
+| Ingestion | `feedparser`, `google-play-scraper`, `praw`, YouTube Data API, X API v2, `pytrends`, `googlemaps`, BeautifulSoup | 11 konektor, satu envelope dokumen |
 | State & politeness | Redis | cooldown, checkpoint inkremental, circuit breaker |
 | Warehouse | PostgreSQL 16 | skema `raw` / `core` / `ops` |
 | Kualitas data | Great Expectations 1.x | gerbang yang memblokir, hasilnya dipersistensi |
@@ -72,12 +72,17 @@ leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
 
 | Konektor | Platform | Kredensial | Catatan |
 |---|---|---|---|
-| `rss` | Berita | — | Google News RSS per keyword + 10 feed redaksi langsung |
+| `rss` | Berita | — | Google News RSS per keyword + 19 feed redaksi langsung |
+| `expanded_rss` | Berita | — | Feed tambahan + query lebih luas (laku pandai, inklusi keuangan) |
+| `web_scraper` | Berita | — | Scrape artikel penuh dari detik, kompas, cnbcindonesia, tempo, tribunnews, merdeka |
 | `playstore` | Ulasan | — | BRImo & BRILink Mobile, membawa rating bintang |
 | `appstore` | Ulasan | — | storefront Indonesia |
 | `reddit` | Sosial | client id/secret | r/indonesia, r/finansial + komentarnya |
 | `youtube` | Sosial | API key | komentar pada video BRILink |
 | `twitter` | Sosial | bearer token | pencarian recent, bahasa Indonesia |
+| `kaskus` | Forum | — | thread & balasan forum Kaskus soal BRILink |
+| `google_trends` | Search | — | minat pencarian BRILink per waktu & provinsi |
+| `google_maps` | Ulasan | API key (opsional) | ulasan lokasi agen BRILink; fallback scraping tanpa key |
 | `seed` | — | — | korpus sintetis deterministik (fallback demo) |
 
 Rating bintang dari app store dipakai ganda: sebagai sinyal di dalam ensemble,

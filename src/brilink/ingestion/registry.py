@@ -6,24 +6,31 @@ from collections.abc import Iterable
 
 from ..settings import Settings, get_settings
 from .base import BaseConnector
+from .expanded_rss_connector import ExpandedRSSConnector
+from .google_maps_connector import GoogleMapsConnector
+from .google_trends_connector import GoogleTrendsConnector
+from .kaskus_connector import KaskusConnector
 from .rss_connector import RSSConnector
 from .seed_connector import SeedConnector
 from .social_connectors import RedditConnector, TwitterConnector, YouTubeConnector
 from .store_connectors import AppStoreConnector, PlayStoreConnector
+from .web_scraper_connector import WebScraperConnector
 
-# News is sourced from RSS only (Google News keyword search + direct outlet
-# feeds). A prior `news-watch` scraper connector covered 60+ outlets directly,
-# but its scrapers broke whenever an outlet changed its markup, which starved
-# the pipeline of news documents entirely. RSS is slower to add new outlets to
-# but it's a stable, maintained protocol - every publisher already keeps its
-# feed working because it also feeds their own reader apps.
+# News is sourced from RSS (Google News keyword search + direct outlet feeds)
+# and expanded RSS (broader queries + more Indonesian outlets).  A dedicated
+# web scraper connector fetches full article text for richer sentiment.
 CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     RSSConnector,
+    ExpandedRSSConnector,
+    WebScraperConnector,
     PlayStoreConnector,
     AppStoreConnector,
     RedditConnector,
     YouTubeConnector,
     TwitterConnector,
+    KaskusConnector,
+    GoogleTrendsConnector,
+    GoogleMapsConnector,
     SeedConnector,
 )
 

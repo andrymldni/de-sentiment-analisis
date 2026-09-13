@@ -473,8 +473,10 @@ CARDS: list[dict] = [
 ]
 
 DASHBOARD_DESCRIPTION = (
-    "Analisis sentimen BRILink dari berita nasional, ulasan aplikasi, dan "
-    "percakapan sosial. Label dihasilkan mesin ensemble multi-sinyal "
+    "Analisis sentimen BRILink dari berita nasional (RSS + web scraping), "
+    "ulasan aplikasi (Play Store, App Store), forum (Reddit, Kaskus), "
+    "media sosial (YouTube, Twitter/X), Google Trends, dan ulasan Google Maps. "
+    "Label dihasilkan mesin ensemble multi-sinyal "
     "(IndoBERT + emosi + rating + konsensus aspek) - bukan pencocokan satu "
     "kata kunci. Setiap angka bisa ditelusuri sampai ke dokumen aslinya di "
     "kartu 'Feed Dokumen'. Gunakan filter Tanggal / Kanal / Aspek di atas "
@@ -513,12 +515,15 @@ DASHBOARD_PARAMETERS: list[dict] = [
         "values_source_type": "static-list",
         "values_source_config": {
             "values": [
-                ["news", "Berita (RSS)"],
+                ["news", "Berita (RSS + Web)"],
                 ["playstore", "Play Store"],
                 ["appstore", "App Store"],
                 ["reddit", "Reddit"],
                 ["youtube", "YouTube"],
                 ["twitter", "Twitter/X"],
+                ["kaskus", "Kaskus Forum"],
+                ["google_trends", "Google Trends"],
+                ["google_maps", "Google Maps"],
                 ["seed", "Korpus Sintetis"],
             ]
         },

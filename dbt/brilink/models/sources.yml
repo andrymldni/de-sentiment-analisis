@@ -22,7 +22,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  values: ['news','playstore','appstore','reddit','youtube','twitter','seed']
+                  values: ['news','playstore','appstore','reddit','youtube','twitter','kaskus','google_trends','google_maps','seed']
           - name: rating
             description: "Star rating where the platform provides one."
       - name: ingestion_runs

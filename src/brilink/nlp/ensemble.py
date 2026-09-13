@@ -64,6 +64,8 @@ PLATFORM_WEIGHT_ADJUSTMENTS: dict[str, dict[str, float]] = {
     "reddit": {"emotion": 1.2},
     "youtube": {"emotion": 1.2},
     "twitter": {"emotion": 1.2},
+    "kaskus": {"emotion": 1.2},
+    "google_maps": {"rating": 1.25, "emotion": 1.15},
 }
 
 

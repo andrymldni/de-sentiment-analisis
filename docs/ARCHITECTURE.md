@@ -5,9 +5,12 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ SUMBER                                                                   │
-│  Google News RSS · 10 feed redaksi langsung (rss connector saja)         │
+│  Google News RSS · feed redaksi langsung (rss + expanded_rss)            │
+│  Web scraping artikel (detik, kompas, cnbcindonesia, tempo, tribun)      │
 │  Google Play (BRImo, BRILink Mobile) · App Store                         │
-│  Reddit · YouTube comments · X/Twitter                                   │
+│  Reddit · YouTube comments · X/Twitter · Kaskus forum                    │
+│  Google Trends (minat pencarian per waktu & provinsi)                    │
+│  Google Maps review (opsional API key; fallback scraping)               │
 │  [fallback] generator korpus sintetis deterministik                      │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 │  BaseConnector.fetch() → Document
@@ -137,7 +140,12 @@ mesin baru, dan versinya sejalan dengan model yang jadi sumbernya.
 │   │   ├── base.py             kontrak Document + BaseConnector
 │   │   ├── registry.py         katalog konektor
 │   │   ├── orchestrator.py     concern lintas-konektor
-│   │   ├── rss_connector.py    Google News + 10 feed redaksi (satu-satunya sumber berita)
+│   │   ├── rss_connector.py    Google News + feed redaksi langsung
+│   │   ├── expanded_rss_connector.py feed tambahan + query lebih luas
+│   │   ├── web_scraper_connector.py scrape artikel penuh dari outlet utama
+│   │   ├── kaskus_connector.py thread forum Kaskus
+│   │   ├── google_trends_connector.py minat pencarian Google Trends
+│   │   ├── google_maps_connector.py review lokasi agen (API/scrape)
 │   │   ├── store_connectors.py Google Play + App Store
 │   │   ├── social_connectors.py Reddit, YouTube, X
 │   │   ├── seed_connector.py   korpus sintetis deterministik
