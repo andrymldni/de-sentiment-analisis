@@ -111,6 +111,10 @@ def test_fetch_with_missing_dependency_raises_wrapped_error(monkeypatch):
         if name in (
             "requests",
             "feedparser",
+            "selenium",
+            "selenium.webdriver",
+            "selenium.webdriver.chrome.options",
+            "selenium.webdriver.common.by",
             "pytrends.request",
             "googlemaps",
             "bs4",
