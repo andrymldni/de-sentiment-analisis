@@ -12,6 +12,15 @@ Cards opt into dashboard-wide filters through ``filters``. Each entry is a
 slug declared in :data:`DASHBOARD_PARAMETERS`; the provisioning script turns it
 into a Metabase template tag (``{{slug}}``) and the SQL uses the optional
 ``[[...]]`` syntax so a card still works when the filter is left unset.
+
+Time range
+----------
+A card with a date filter never hard-codes its own window (no
+``CURRENT_DATE - 90``): with the filter unset it shows the full history
+(backfilled to 2019), with it set it shows exactly that period. A hard window
+used to make every date filter outside the last 90 days return nothing. Only
+the deliberately "right now" cards - early-warning alerts, connector freshness
+- keep a fixed window, and they have no date filter.
 """
 
 from __future__ import annotations
@@ -27,15 +36,18 @@ SENTIMENT_COLORS: dict[str, str] = {
 CARDS: list[dict] = [
     {
         "key": "kpi_documents",
-        "name": "Total Dokumen Dianalisis (90 hari)",
-        "description": "Jumlah dokumen dari seluruh kanal yang lolos ambang keyakinan.",
+        "name": "Total Dokumen Dianalisis",
+        "description": (
+            "Jumlah dokumen dari seluruh kanal yang lolos ambang keyakinan. "
+            "Tanpa filter tanggal = seluruh riwayat (2019 - sekarang)."
+        ),
         "display": "scalar",
         "position": {"row": 0, "col": 0, "size_x": 6, "size_y": 3},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
         "sql": """
             SELECT SUM(document_count) AS "Dokumen"
             FROM {schema}.mart_sentiment_daily
-            WHERE event_date >= CURRENT_DATE - 90
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -43,17 +55,20 @@ CARDS: list[dict] = [
     },
     {
         "key": "kpi_nss",
-        "name": "Net Sentiment Score (30 hari)",
-        "description": "(%positif - %negatif) x 100. Rentang -100 s/d +100.",
+        "name": "Net Sentiment Score",
+        "description": (
+            "(%positif - %negatif) x 100, rentang -100 s/d +100, untuk periode filter "
+            "tanggal (tanpa filter = seluruh riwayat)."
+        ),
         "display": "scalar",
         "position": {"row": 0, "col": 6, "size_x": 6, "size_y": 3},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
         "sql": """
             SELECT ROUND(
                      (SUM(positive_count) - SUM(negative_count))::numeric
-                     / NULLIF(SUM(document_count), 0) * 100, 1) AS "NSS 30 Hari"
+                     / NULLIF(SUM(document_count), 0) * 100, 1) AS "NSS"
             FROM {schema}.mart_sentiment_daily
-            WHERE event_date >= CURRENT_DATE - 30
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -62,8 +77,8 @@ CARDS: list[dict] = [
     },
     {
         "key": "kpi_negative_share",
-        "name": "Porsi Sentimen Negatif (30 hari)",
-        "description": "Persentase dokumen berlabel negatif.",
+        "name": "Porsi Sentimen Negatif",
+        "description": "Persentase dokumen berlabel negatif pada periode filter tanggal.",
         "display": "scalar",
         "position": {"row": 0, "col": 12, "size_x": 6, "size_y": 3},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
@@ -71,7 +86,7 @@ CARDS: list[dict] = [
             SELECT ROUND(SUM(negative_count)::numeric
                          / NULLIF(SUM(document_count), 0) * 100, 1) AS "Negatif %"
             FROM {schema}.mart_sentiment_daily
-            WHERE event_date >= CURRENT_DATE - 30
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -97,22 +112,23 @@ CARDS: list[dict] = [
     },
     {
         "key": "trend_daily",
-        "name": "Tren Sentimen Mingguan (NSS & Volume)",
+        "name": "Tren Sentimen Bulanan (NSS & Volume)",
         "description": (
-            "Batang = jumlah dokumen per minggu, garis = Net Sentiment Score minggu itu. "
-            "Agregasi mingguan dipakai karena volume harian terlalu kecil dan bergerigi."
+            "Batang = jumlah dokumen per bulan, garis = Net Sentiment Score bulan itu. "
+            "Agregasi bulanan agar riwayat 2019 - sekarang tetap terbaca; persempit "
+            "dengan filter tanggal untuk melihat periode tertentu."
         ),
         "display": "combo",
         "position": {"row": 3, "col": 0, "size_x": 16, "size_y": 7},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
         "sql": """
             SELECT
-                DATE_TRUNC('week', event_date)::date                AS "Minggu",
+                DATE_TRUNC('month', event_date)::date               AS "Bulan",
                 SUM(document_count)                                 AS "Jumlah Dokumen",
                 ROUND((SUM(positive_count) - SUM(negative_count))::numeric
                       / NULLIF(SUM(document_count), 0) * 100, 1)    AS "NSS"
             FROM {schema}.mart_sentiment_daily
-            WHERE event_date >= CURRENT_DATE - 120
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -120,10 +136,9 @@ CARDS: list[dict] = [
             ORDER BY 1
         """,
         "visualization_settings": {
-            "graph.dimensions": ["Minggu"],
+            "graph.dimensions": ["Bulan"],
             "graph.metrics": ["Jumlah Dokumen", "NSS"],
-            "graph.x_axis.title_text": "Minggu",
-            "graph.show_values": True,
+            "graph.x_axis.title_text": "Bulan",
             "series_settings": {
                 "Jumlah Dokumen": {"display": "bar", "color": "#A7ADB5"},
                 "NSS": {"display": "line", "color": "#509EE3", "axis": "right"},
@@ -144,7 +159,7 @@ CARDS: list[dict] = [
                 SUM(neutral_count)  AS "Netral",
                 SUM(negative_count) AS "Negatif"
             FROM {schema}.mart_sentiment_daily
-            WHERE event_date >= CURRENT_DATE - 90
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -163,7 +178,7 @@ CARDS: list[dict] = [
     },
     {
         "key": "aspect_ranking",
-        "name": "Peringkat Aspek Berdasarkan NSS (90 hari)",
+        "name": "Peringkat Aspek Berdasarkan NSS",
         "description": "Aspek mana yang menjadi sumber keluhan, dan mana yang jadi kekuatan.",
         "display": "row",
         "position": {"row": 10, "col": 0, "size_x": 12, "size_y": 7},
@@ -175,7 +190,7 @@ CARDS: list[dict] = [
                       / NULLIF(SUM(mention_documents), 0) * 100, 1) AS "NSS Aspek",
                 SUM(mention_documents)                              AS "Jumlah Dokumen"
             FROM {schema}.mart_aspect_daily
-            WHERE event_date >= CURRENT_DATE - 90
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -192,19 +207,19 @@ CARDS: list[dict] = [
     },
     {
         "key": "aspect_trend",
-        "name": "Tren Mingguan per Aspek",
-        "description": "Pergerakan NSS tiap aspek dari minggu ke minggu.",
+        "name": "Tren Bulanan per Aspek",
+        "description": "Pergerakan NSS tiap aspek dari bulan ke bulan (min. 3 dokumen per titik).",
         "display": "line",
         "position": {"row": 10, "col": 12, "size_x": 12, "size_y": 7},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal", "aspek"],
         "sql": """
             SELECT
-                DATE_TRUNC('week', event_date)::date                AS "Minggu",
+                DATE_TRUNC('month', event_date)::date               AS "Bulan",
                 aspect_label                                        AS "Aspek",
                 ROUND((SUM(positive_count) - SUM(negative_count))::numeric
                       / NULLIF(SUM(mention_documents), 0) * 100, 1) AS "NSS"
             FROM {schema}.mart_aspect_daily
-            WHERE event_date >= CURRENT_DATE - 120
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
@@ -214,51 +229,101 @@ CARDS: list[dict] = [
             ORDER BY 1
         """,
         "visualization_settings": {
-            "graph.dimensions": ["Minggu", "Aspek"],
+            "graph.dimensions": ["Bulan", "Aspek"],
             "graph.metrics": ["NSS"],
         },
     },
     {
         "key": "aspect_matrix",
         "name": "Matriks Aspek x Kanal",
-        "description": "Di kanal mana setiap aspek paling banyak dibicarakan, dan bagaimana nadanya.",
+        "description": (
+            "Di kanal mana setiap aspek paling banyak dibicarakan, dan bagaimana nadanya, "
+            "pada periode filter tanggal."
+        ),
         "display": "table",
         "position": {"row": 17, "col": 0, "size_x": 12, "size_y": 7},
-        "filters": ["kanal", "aspek"],
+        "filters": ["tgl_mulai", "tgl_akhir", "kanal", "aspek"],
+        # Aggregated from the daily mart (not mart_aspect_source_matrix, which is
+        # fixed to the trailing 90 days) so the date filter reaches back to 2019.
         "sql": """
             SELECT
-                aspect_label       AS "Aspek",
-                source_platform    AS "Kanal",
-                mention_documents  AS "Dokumen",
-                aspect_nss         AS "NSS",
-                share_of_voice_pct AS "Share of Voice %"
-            FROM {schema}.mart_aspect_source_matrix
+                aspect_label                                        AS "Aspek",
+                source_platform                                     AS "Kanal",
+                SUM(mention_documents)                              AS "Dokumen",
+                ROUND((SUM(positive_count) - SUM(negative_count))::numeric
+                      / NULLIF(SUM(mention_documents), 0) * 100, 2) AS "NSS",
+                ROUND(SUM(mention_documents)::numeric
+                      / NULLIF(SUM(SUM(mention_documents))
+                               OVER (PARTITION BY source_platform), 0) * 100, 2)
+                                                                    AS "Share of Voice %"
+            FROM {schema}.mart_aspect_daily
             WHERE 1 = 1
+              [[AND event_date >= {{tgl_mulai}}]]
+              [[AND event_date <= {{tgl_akhir}}]]
               [[AND source_platform = {{kanal}}]]
               [[AND aspect_label = {{aspek}}]]
-            ORDER BY mention_documents DESC
+            GROUP BY 1, 2
+            ORDER BY 3 DESC
         """,
     },
     {
         "key": "source_scorecard",
-        "name": "Scorecard Sumber (30 vs 90 hari)",
-        "description": "Sumber mana yang nadanya berubah paling tajam belakangan ini.",
+        "name": "Scorecard Sumber",
+        "description": (
+            "NSS tiap sumber pada periode filter tanggal (tanpa filter = seluruh riwayat), "
+            "dibandingkan 90 hari terakhir periode itu. Delta negatif = nada memburuk."
+        ),
         "display": "table",
         "position": {"row": 17, "col": 12, "size_x": 12, "size_y": 7},
-        "filters": ["kanal"],
+        "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
+        # Aggregated from the daily mart (not mart_sentiment_by_source, which is
+        # fixed to the trailing 90 days). "Recent" = the last 90 days of the
+        # selected period, so the comparison still works for, say, 2021 alone.
         "sql": """
+            WITH scoped AS (
+                SELECT *
+                FROM {schema}.mart_sentiment_daily
+                WHERE 1 = 1
+                  [[AND event_date >= {{tgl_mulai}}]]
+                  [[AND event_date <= {{tgl_akhir}}]]
+                  [[AND source_platform = {{kanal}}]]
+            ),
+            flagged AS (
+                SELECT *,
+                       event_date > MAX(event_date) OVER () - 90 AS is_recent
+                FROM scoped
+            ),
+            per_source AS (
+                SELECT
+                    source_platform,
+                    source_name,
+                    SUM(document_count)                                   AS docs,
+                    MIN(event_date)                                       AS first_date,
+                    MAX(event_date)                                       AS last_date,
+                    ROUND((SUM(positive_count) - SUM(negative_count))::numeric
+                          / NULLIF(SUM(document_count), 0) * 100, 1)      AS nss_all,
+                    ROUND((SUM(positive_count) FILTER (WHERE is_recent)
+                           - SUM(negative_count) FILTER (WHERE is_recent))::numeric
+                          / NULLIF(SUM(document_count) FILTER (WHERE is_recent), 0)
+                          * 100, 1)                                       AS nss_recent,
+                    ROUND(SUM(avg_confidence * document_count)
+                          / NULLIF(SUM(document_count), 0), 4)            AS avg_conf
+                FROM flagged
+                GROUP BY 1, 2
+            )
             SELECT
-                source_platform       AS "Kanal",
-                source_name           AS "Sumber",
-                documents_90d         AS "Dokumen 90h",
-                nss_90d               AS "NSS 90h",
-                nss_30d               AS "NSS 30h",
-                nss_delta_30d_vs_90d  AS "Delta",
-                avg_confidence        AS "Rata-rata Keyakinan"
-            FROM {schema}.mart_sentiment_by_source
-            WHERE documents_90d >= 2
-              [[AND source_platform = {{kanal}}]]
-            ORDER BY nss_delta_30d_vs_90d ASC
+                source_platform         AS "Kanal",
+                source_name             AS "Sumber",
+                docs                    AS "Dokumen",
+                first_date              AS "Pertama",
+                last_date               AS "Terakhir",
+                nss_all                 AS "NSS Periode",
+                nss_recent              AS "NSS 90h Terakhir",
+                nss_recent - nss_all    AS "Delta",
+                avg_conf                AS "Rata-rata Keyakinan"
+            FROM per_source
+            WHERE docs >= 2
+            ORDER BY "Delta" ASC NULLS LAST, docs DESC
         """,
     },
     {
@@ -320,24 +385,30 @@ CARDS: list[dict] = [
     {
         "key": "engine_quality",
         "name": "Kualitas Mesin Sentimen",
-        "description": "Kecocokan dengan rating bintang & gold set, plus ketersediaan tiap sinyal per hari.",
+        "description": "Kecocokan dengan rating bintang & gold set, plus rata-rata keyakinan, per bulan.",
         "display": "line",
         "position": {"row": 30, "col": 0, "size_x": 12, "size_y": 6},
         "filters": ["tgl_mulai", "tgl_akhir"],
+        # Monthly and volume-weighted (sum of matches / sum of documents), not an
+        # average of daily rates, so a 1-document day cannot swing the line.
         "sql": """
             SELECT
-                event_date                          AS "Tanggal",
-                ROUND(rating_agreement_rate * 100, 1) AS "Cocok dgn Rating %",
-                ROUND(gold_agreement_rate   * 100, 1) AS "Cocok dgn Gold Set %",
-                ROUND(avg_confidence        * 100, 1) AS "Rata-rata Keyakinan %"
+                DATE_TRUNC('month', event_date)::date               AS "Bulan",
+                ROUND(SUM(rating_matches)::numeric
+                      / NULLIF(SUM(rated_documents), 0) * 100, 1)   AS "Cocok dgn Rating %",
+                ROUND(SUM(gold_matches)::numeric
+                      / NULLIF(SUM(gold_documents), 0) * 100, 1)    AS "Cocok dgn Gold Set %",
+                ROUND(SUM(avg_confidence * documents_scored)
+                      / NULLIF(SUM(documents_scored), 0) * 100, 1)  AS "Rata-rata Keyakinan %"
             FROM {schema}.mart_engine_quality
-            WHERE event_date >= CURRENT_DATE - 90
+            WHERE 1 = 1
               [[AND event_date >= {{tgl_mulai}}]]
               [[AND event_date <= {{tgl_akhir}}]]
+            GROUP BY 1
             ORDER BY 1
         """,
         "visualization_settings": {
-            "graph.dimensions": ["Tanggal"],
+            "graph.dimensions": ["Bulan"],
             "graph.metrics": [
                 "Cocok dgn Rating %",
                 "Cocok dgn Gold Set %",
@@ -419,7 +490,7 @@ CARDS: list[dict] = [
                 ROUND(100.0 * COUNT(*) FILTER (WHERE success)
                       / NULLIF(COUNT(*), 0), 1)                 AS "Lolos %"
             FROM {schema}.stg_data_quality
-            WHERE check_date >= CURRENT_DATE - 30
+            WHERE 1 = 1
               [[AND check_date >= {{tgl_mulai}}]]
               [[AND check_date <= {{tgl_akhir}}]]
             GROUP BY 1

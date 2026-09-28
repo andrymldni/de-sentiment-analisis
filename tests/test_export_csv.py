@@ -88,3 +88,15 @@ def test_dashboard_parameters_use_types_metabase_accepts():
         for slug in card.get("filters", []):
             assert slug in slugs and slug in FILTERS
             assert "{{" + slug + "}}" in card["sql"], (card["key"], slug)
+
+
+def test_date_filtered_cards_have_no_hard_coded_window():
+    # A fixed "CURRENT_DATE - 90" silently emptied every card whenever the date
+    # filter pointed at backfilled history (2019+). The filter owns the range.
+    for card in CARDS:
+        if "tgl_mulai" not in card.get("filters", []):
+            continue
+        sql = card["sql"].upper()
+        assert "CURRENT_DATE -" not in sql, card["key"]
+        assert "NOW() -" not in sql, card["key"]
+        assert "_90D" not in sql, card["key"]

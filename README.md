@@ -157,10 +157,10 @@ manusia (`reviewed_label`) selalu menang atas label model di seluruh mart.
 
 19 kartu, dibuat otomatis oleh `python -m brilink.serving.metabase_provision`:
 
-**KPI** — total dokumen · Net Sentiment Score 30 hari · porsi negatif · ukuran antrean tinjauan
-**Tren** — volume & NSS mingguan (batang + garis) · komposisi label per kanal (hijau/abu/merah)
-**Aspek** — peringkat NSS per aspek · tren mingguan per aspek · matriks aspek × kanal
-**Sumber** — scorecard 30 vs 90 hari dengan delta
+**KPI** — total dokumen · Net Sentiment Score · porsi negatif · ukuran antrean tinjauan
+**Tren** — volume & NSS bulanan (batang + garis) · komposisi label per kanal (hijau/abu/merah)
+**Aspek** — peringkat NSS per aspek · tren bulanan per aspek · matriks aspek × kanal
+**Sumber** — scorecard per sumber: NSS periode vs 90 hari terakhir periode itu
 **Aksi** — peringatan dini berbasis z-score · antrean tinjauan manual
 **Kepercayaan** — kualitas mesin (kecocokan rating & gold set) · kesehatan pipeline & data quality
 **Drill-down** — feed dokumen lengkap dengan teks, label, keyakinan, frasa pemicu, dan aspek
@@ -169,6 +169,14 @@ freshness ingestion per konektor · snapshot gate terakhir
 
 Spesifikasinya adalah kode (`src/brilink/serving/dashboard_spec.py`), bisa
 direview di pull request, dan provisioning-nya idempoten.
+
+**Rentang waktu:** kartu yang punya filter tanggal tidak membatasi jendela
+sendiri. Jika filter **Tanggal mulai / Tanggal akhir** dikosongkan, kartu
+menampilkan seluruh riwayat (hasil backfill sejak 2019). Jika diisi, kartu
+menampilkan persis periode itu, misalnya `2019-01-01` s/d `2021-12-31`. Hanya
+kartu yang memang bersifat "saat ini" yang tetap berjendela tetap dan tidak
+punya filter tanggal: peringatan dini (7 hari vs baseline 28 hari) dan
+freshness konektor (30 hari).
 
 ## Output CSV
 
