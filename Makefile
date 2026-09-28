@@ -64,6 +64,10 @@ seed: ## Load the synthetic demo corpus
 score: ## Score unscored documents
 	$(COMPOSE) --profile tools run --rm --build pipeline-runner python -m brilink.nlp.run_sentiment
 
+.PHONY: rejudge
+rejudge: ## Send the existing review queue to the LLM judge (needs SENTIMENT_ENABLE_LLM_JUDGE=true)
+	$(COMPOSE) --profile tools run --rm --build pipeline-runner python -m brilink.nlp.run_sentiment --rejudge-review
+
 .PHONY: validate
 validate: ## Run the data quality gate
 	$(COMPOSE) --profile tools run --rm --build pipeline-runner python -m brilink.quality.validate --hours 168
@@ -76,6 +80,12 @@ dbt: ## dbt deps + run + test
 .PHONY: dashboard
 dashboard: ## Provision the Metabase dashboard
 	$(COMPOSE) --profile tools run --rm --build pipeline-runner python -m brilink.serving.metabase_provision
+
+.PHONY: export
+export: ## Export analysed data to CSV in ./output (make export DAYS=30 PLATFORM=news)
+	$(COMPOSE) --profile tools run --rm --build pipeline-runner \
+	  python -m brilink.serving.export_csv --output-dir /opt/airflow/output \
+	  $(if $(DAYS),--days $(DAYS),) $(if $(PLATFORM),--platform $(PLATFORM),)
 
 # --- development -----------------------------------------------------
 .PHONY: install

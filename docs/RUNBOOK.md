@@ -146,8 +146,10 @@ untuk ditambal manual. Kalau menemukan pola yang konsisten salah:
    supaya jadi regresi otomatis.
 2. `make bench` untuk melihat apakah IndoBERT sudah benar atau memang salah.
 3. Kalau memang salah dan pola itu sering muncul, opsinya: (a) aktifkan
-   `SENTIMENT_ENABLE_LLM_JUDGE=true` supaya dokumen berkeyakinan rendah
-   dieskalasi ke LLM, atau (b) adjudikasi manual lewat `reviewed_label`
+   `SENTIMENT_ENABLE_LLM_JUDGE=true` (plus `DEEPSEEK_API_KEY` atau
+   `ANTHROPIC_API_KEY`) supaya dokumen berkeyakinan rendah dieskalasi ke
+   LLM, lalu `make rejudge` sekali untuk antrean yang sudah ada — lihat
+   `docs/SENTIMENT_METHODOLOGY.md` §6, atau (b) adjudikasi manual lewat `reviewed_label`
    (lihat contoh SQL di atas) — ini selalu menang atas label model.
 4. Naikkan `SENTIMENT_MODEL_VERSION` bila kamu mengganti model/bobot
    ensemble, lalu re-score.

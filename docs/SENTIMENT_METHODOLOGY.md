@@ -177,6 +177,31 @@ berkeyakinan rendah — dan hanya itu — dieskalasi ke LLM sebagai sinyal
 tambahan (bobot 0.35). Tanpa key, mesin berjalan identik; hanya plafon
 otomasinya yang turun.
 
+Provider dipilih lewat `SENTIMENT_LLM_PROVIDER`:
+
+| Provider | Key | Model default | Catatan |
+|---|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` | API format OpenAI via `httpx`, JSON mode, thinking mode dimatikan |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` | butuh `pip install anthropic` di image |
+
+`auto` (default) memakai key yang terisi, DeepSeek lebih dulu. Pengaman:
+
+- Balasan yang bukan JSON valid, labelnya tidak dikenal, atau labelnya
+  bertentangan dengan tanda skornya **ditolak** dan dicoba ulang (maks
+  `SENTIMENT_LLM_MAX_RETRIES`, default 3). Kalau tetap gagal, dokumen
+  tetap di antrean tinjauan manusia — tidak pernah ditebak.
+- HTTP 401/402/403 (key salah, saldo habis) mematikan judge untuk sisa run,
+  jadi tidak ada ratusan panggilan yang pasti gagal.
+- `SENTIMENT_LLM_MAX_DOCUMENTS` (default 300) membatasi jumlah dokumen yang
+  dikirim per run supaya re-score besar tidak menguras saldo.
+- Model dan alasan LLM disimpan di `signals.llm_judge` dan
+  `explanation.llm_reason` untuk audit.
+
+Dokumen yang sudah di-skor sebelum judge diaktifkan tidak otomatis ikut.
+Jalankan sekali `python -m brilink.nlp.run_sentiment --rejudge-review` untuk
+mengirim antrean tinjauan yang belum pernah dilihat LLM (dokumen yang sudah
+diberi `reviewed_label` manusia dilewati).
+
 ---
 
 ## 7. Evaluasi tanpa dataset berlabel manual

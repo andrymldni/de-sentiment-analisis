@@ -16,6 +16,13 @@ into a Metabase template tag (``{{slug}}``) and the SQL uses the optional
 
 from __future__ import annotations
 
+# Fixed, intuitive colours so "negatif" is never rendered in blue.
+SENTIMENT_COLORS: dict[str, str] = {
+    "Positif": "#84BB4C",
+    "Netral": "#C4C9D0",
+    "Negatif": "#ED6E6E",
+}
+
 # Grid is 24 columns wide in Metabase.
 CARDS: list[dict] = [
     {
@@ -90,18 +97,20 @@ CARDS: list[dict] = [
     },
     {
         "key": "trend_daily",
-        "name": "Tren Sentimen Harian (rolling 7 hari)",
-        "description": "NSS harian dan rata-rata bergerak 7 hari untuk meredam noise akhir pekan.",
-        "display": "line",
+        "name": "Tren Sentimen Mingguan (NSS & Volume)",
+        "description": (
+            "Batang = jumlah dokumen per minggu, garis = Net Sentiment Score minggu itu. "
+            "Agregasi mingguan dipakai karena volume harian terlalu kecil dan bergerigi."
+        ),
+        "display": "combo",
         "position": {"row": 3, "col": 0, "size_x": 16, "size_y": 7},
         "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
         "sql": """
             SELECT
-                event_date                                          AS "Tanggal",
+                DATE_TRUNC('week', event_date)::date                AS "Minggu",
+                SUM(document_count)                                 AS "Jumlah Dokumen",
                 ROUND((SUM(positive_count) - SUM(negative_count))::numeric
-                      / NULLIF(SUM(document_count), 0) * 100, 2)    AS "NSS Harian",
-                ROUND(AVG(net_sentiment_score_rolling), 2)          AS "NSS Rolling 7 Hari",
-                SUM(document_count)                                 AS "Volume Dokumen"
+                      / NULLIF(SUM(document_count), 0) * 100, 1)    AS "NSS"
             FROM {schema}.mart_sentiment_daily
             WHERE event_date >= CURRENT_DATE - 120
               [[AND event_date >= {{tgl_mulai}}]]
@@ -111,8 +120,14 @@ CARDS: list[dict] = [
             ORDER BY 1
         """,
         "visualization_settings": {
-            "graph.dimensions": ["Tanggal"],
-            "graph.metrics": ["NSS Harian", "NSS Rolling 7 Hari"],
+            "graph.dimensions": ["Minggu"],
+            "graph.metrics": ["Jumlah Dokumen", "NSS"],
+            "graph.x_axis.title_text": "Minggu",
+            "graph.show_values": True,
+            "series_settings": {
+                "Jumlah Dokumen": {"display": "bar", "color": "#A7ADB5"},
+                "NSS": {"display": "line", "color": "#509EE3", "axis": "right"},
+            },
         },
     },
     {
@@ -140,6 +155,10 @@ CARDS: list[dict] = [
             "graph.dimensions": ["Kanal"],
             "graph.metrics": ["Positif", "Netral", "Negatif"],
             "stackable.stack_type": "normalized",
+            "graph.show_values": True,
+            "series_settings": {
+                label: {"color": color} for label, color in SENTIMENT_COLORS.items()
+            },
         },
     },
     {
@@ -167,6 +186,8 @@ CARDS: list[dict] = [
         "visualization_settings": {
             "graph.dimensions": ["Aspek"],
             "graph.metrics": ["NSS Aspek"],
+            "graph.show_values": True,
+            "series_settings": {"NSS Aspek": {"color": "#509EE3"}},
         },
     },
     {
@@ -235,7 +256,7 @@ CARDS: list[dict] = [
                 nss_delta_30d_vs_90d  AS "Delta",
                 avg_confidence        AS "Rata-rata Keyakinan"
             FROM {schema}.mart_sentiment_by_source
-            WHERE documents_90d >= 5
+            WHERE documents_90d >= 2
               [[AND source_platform = {{kanal}}]]
             ORDER BY nss_delta_30d_vs_90d ASC
         """,
@@ -258,10 +279,17 @@ CARDS: list[dict] = [
                 severity        AS "Tingkat",
                 alert_status    AS "Status"
             FROM {schema}.mart_sentiment_alerts
-            WHERE alert_status IN ('deterioration_significant', 'deterioration_watch')
+            WHERE 1 = 1
               [[AND source_platform = {{kanal}}]]
               [[AND aspect_label = {{aspek}}]]
-            ORDER BY z_score ASC
+            -- Show every aspect (incl. 'stable' / 'insufficient_data') so an
+            -- empty card never looks like a broken one; deteriorations first.
+            ORDER BY CASE alert_status
+                         WHEN 'deterioration_significant' THEN 0
+                         WHEN 'deterioration_watch' THEN 1
+                         ELSE 2
+                     END,
+                     z_score ASC NULLS LAST
         """,
     },
     {
@@ -323,7 +351,9 @@ CARDS: list[dict] = [
         "description": "Throughput konektor, tingkat duplikat, dan hasil gerbang Great Expectations.",
         "display": "table",
         "position": {"row": 30, "col": 12, "size_x": 12, "size_y": 6},
-        "filters": ["tgl_mulai", "tgl_akhir", "kanal"],
+        # No "kanal" filter: rows are per *connector* (rss, web_scraper, ...),
+        # not per platform, so filtering by kanal=news always returned nothing.
+        "filters": ["tgl_mulai", "tgl_akhir"],
         "sql": """
             SELECT
                 report_date         AS "Tanggal",
@@ -338,7 +368,6 @@ CARDS: list[dict] = [
             WHERE 1 = 1
               [[AND report_date >= {{tgl_mulai}}]]
               [[AND report_date <= {{tgl_akhir}}]]
-              [[AND connector = {{kanal}}]]
             ORDER BY report_date DESC, connector
             LIMIT 200
         """,
@@ -353,13 +382,13 @@ CARDS: list[dict] = [
         "sql": """
             SELECT
                 event_date          AS "Tanggal",
-                event_at            AS "Waktu",
                 source_platform     AS "Kanal",
                 source_name         AS "Sumber",
-                headline            AS "Judul / Cuplikan",
+                -- Verdict columns first so they are visible without scrolling.
                 sentiment_label     AS "Sentimen",
                 sentiment_score     AS "Skor",
                 confidence          AS "Keyakinan",
+                headline            AS "Judul / Cuplikan",
                 rating              AS "Rating",
                 negative_aspects    AS "Aspek Negatif",
                 positive_aspects    AS "Aspek Positif",
@@ -436,7 +465,6 @@ CARDS: list[dict] = [
         "display": "table",
         "position": {"row": 50, "col": 0, "size_x": 12, "size_y": 6},
         "schema": "analytics_staging",
-        "filters": ["kanal"],
         "sql": """
             SELECT
                 connector                                                       AS "Konektor",
@@ -445,7 +473,6 @@ CARDS: list[dict] = [
                 ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(started_at))) / 3600, 1)  AS "Umur (jam)"
             FROM {schema}.stg_ingestion_runs
             WHERE started_at >= NOW() - INTERVAL '30 days'
-              [[AND connector = {{kanal}}]]
             GROUP BY 1
             ORDER BY 3 DESC NULLS LAST
         """,
@@ -509,7 +536,9 @@ DASHBOARD_PARAMETERS: list[dict] = [
         "name": "Kanal",
         "slug": "kanal",
         "id": "param_kanal",
-        "type": "category/string",
+        # Metabase v0.50 rejects "category/string" at query time (HTTP 500,
+        # "Invalid parameter type") - which broke every filtered card.
+        "type": "string/=",
         "sectionId": "string",
         "default": None,
         "values_source_type": "static-list",
@@ -532,7 +561,7 @@ DASHBOARD_PARAMETERS: list[dict] = [
         "name": "Aspek",
         "slug": "aspek",
         "id": "param_aspek",
-        "type": "category/string",
+        "type": "string/=",
         "sectionId": "string",
         "default": None,
         "values_source_type": "static-list",
@@ -555,6 +584,6 @@ DASHBOARD_PARAMETERS: list[dict] = [
 FILTERS: dict[str, dict] = {
     "tgl_mulai": {"type": "date", "widget-type": "date/single", "display-name": "Tanggal mulai"},
     "tgl_akhir": {"type": "date", "widget-type": "date/single", "display-name": "Tanggal akhir"},
-    "kanal": {"type": "text", "widget-type": "category", "display-name": "Kanal"},
-    "aspek": {"type": "text", "widget-type": "category", "display-name": "Aspek"},
+    "kanal": {"type": "text", "widget-type": "string/=", "display-name": "Kanal"},
+    "aspek": {"type": "text", "widget-type": "string/=", "display-name": "Aspek"},
 }

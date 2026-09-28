@@ -28,12 +28,17 @@ x-brilink-env: &brilink-env
   SENTIMENT_ENABLE_TRANSFORMER: ${SENTIMENT_ENABLE_TRANSFORMER:-true}
   SENTIMENT_ENABLE_EMOTION: ${SENTIMENT_ENABLE_EMOTION:-true}
   SENTIMENT_MODEL_VERSION: ${SENTIMENT_MODEL_VERSION:-brilink-ensemble-v2.0.0}
+  SENTIMENT_ENABLE_LLM_JUDGE: ${SENTIMENT_ENABLE_LLM_JUDGE:-false}
+  SENTIMENT_LLM_PROVIDER: ${SENTIMENT_LLM_PROVIDER:-auto}
+  SENTIMENT_LLM_MODEL: ${SENTIMENT_LLM_MODEL:-}
+  SENTIMENT_LLM_MAX_DOCUMENTS: ${SENTIMENT_LLM_MAX_DOCUMENTS:-300}
   REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
   REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
   YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
   TWITTER_BEARER_TOKEN: ${TWITTER_BEARER_TOKEN:-}
   GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
   METABASE_URL: http://metabase:3000
   METABASE_ADMIN_EMAIL: ${METABASE_ADMIN_EMAIL:-admin@brilink.local}
   METABASE_ADMIN_PASSWORD: ${METABASE_ADMIN_PASSWORD:-BrilinkDemo123!}
@@ -69,6 +74,8 @@ x-airflow-common: &airflow-common
     - ./src:/opt/airflow/src
     - ./dbt/brilink:/opt/airflow/dbt/brilink
     - ./sql:/opt/airflow/sql
+    # CSV exports land here and are visible on the host (./output).
+    - ./output:/opt/airflow/output
     - airflow_logs:/opt/airflow/logs
     - hf_cache:/opt/airflow/.cache/huggingface
   depends_on:
@@ -208,6 +215,8 @@ services:
         cd /opt/airflow/dbt/brilink && dbt run --profiles-dir . && dbt test --profiles-dir .
         echo "==> 5/5 metabase dashboard"
         cd /opt/airflow && python -m brilink.serving.metabase_provision
+        echo "==> 6/6 csv export"
+        python -m brilink.serving.export_csv --output-dir /opt/airflow/output
         echo "Pipeline complete."
     depends_on:
       postgres:

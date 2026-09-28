@@ -4,7 +4,7 @@
         -> data_quality_gate
             -> score_sentiment
                 -> dbt_deps -> dbt_run -> dbt_test
-                    -> provision_dashboard
+                    -> provision_dashboard + export_csv (parallel)
 
 Design notes
 ------------
@@ -33,7 +33,19 @@ LOCAL_TZ = pendulum.timezone("Asia/Jakarta")
 DBT_DIR = "/opt/airflow/dbt/brilink"
 DBT_FLAGS = "--profiles-dir . --target dev"
 
-CONNECTORS = ["rss", "expanded_rss", "web_scraper", "playstore", "appstore", "reddit", "youtube", "twitter", "kaskus", "google_trends", "google_maps"]
+CONNECTORS = [
+    "rss",
+    "expanded_rss",
+    "web_scraper",
+    "playstore",
+    "appstore",
+    "reddit",
+    "youtube",
+    "twitter",
+    "kaskus",
+    "google_trends",
+    "google_maps",
+]
 
 DEFAULT_ARGS = {
     "owner": "data-engineering",
@@ -199,6 +211,18 @@ with DAG(
         ),
     )
 
+    export_csv = BashOperator(
+        task_id="export_csv",
+        bash_command=(
+            "cd /opt/airflow && python -m brilink.serving.export_csv "
+            "--output-dir /opt/airflow/output"
+        ),
+        doc_md=(
+            "Second serving surface: analysed documents plus aspect and source "
+            "summaries as CSV in ./output, for Excel / Google Sheets users."
+        ),
+    )
+
     end = EmptyOperator(task_id="end", trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
 
     consolidated = consolidate_ingestion()
@@ -211,6 +235,6 @@ with DAG(
         >> gate
         >> score_sentiment
         >> transform
-        >> provision_dashboard
+        >> [provision_dashboard, export_csv]
         >> end
     )

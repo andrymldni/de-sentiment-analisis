@@ -38,3 +38,9 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# local test artefacts
+.testlogs/
+
+# generated CSV exports (python -m brilink.serving.export_csv)
+output/

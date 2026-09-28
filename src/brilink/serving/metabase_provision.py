@@ -248,6 +248,22 @@ def upsert_card(
     return created["id"]
 
 
+def archive_stale_cards(client: MetabaseClient, known: dict[str, dict], wanted: set[str]) -> None:
+    """Archive cards that were renamed or removed from the spec.
+
+    Cards are matched by name, so renaming a card in ``dashboard_spec`` would
+    otherwise leave the old version orphaned in the collection.
+    """
+    for name, item in known.items():
+        if name in wanted:
+            continue
+        try:
+            client.put(f"/api/card/{item['id']}", {"archived": True})
+            logger.info("Archived stale card '%s' (id=%s)", name, item["id"])
+        except Exception as exc:
+            logger.warning("Could not archive stale card '%s': %s", name, exc)
+
+
 def ensure_dashboard(client: MetabaseClient, name: str, collection_id: int) -> int:
     items = client.get(f"/api/collection/{collection_id}/items", params={"models": "dashboard"})
     data = items.get("data", []) if isinstance(items, dict) else (items or [])
@@ -362,6 +378,8 @@ def provision(schema: str = MART_SCHEMA) -> dict:
                 )
             except Exception as exc:
                 logger.error("Card '%s' failed: %s", spec["name"], exc)
+
+        archive_stale_cards(client, known, {spec["name"] for spec in CARDS})
 
         dashboard_id = ensure_dashboard(client, settings.dashboard_name, collection_id)
         lay_out_dashboard(client, dashboard_id, card_ids)

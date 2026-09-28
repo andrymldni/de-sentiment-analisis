@@ -26,7 +26,18 @@ logger = get_logger(__name__)
 
 SUITE_NAME = "raw_documents_suite"
 
-KNOWN_PLATFORMS = ["news", "playstore", "appstore", "reddit", "youtube", "twitter", "kaskus", "google_trends", "google_maps", "seed"]
+KNOWN_PLATFORMS = [
+    "news",
+    "playstore",
+    "appstore",
+    "reddit",
+    "youtube",
+    "twitter",
+    "kaskus",
+    "google_trends",
+    "google_maps",
+    "seed",
+]
 KNOWN_LANGUAGES = ["id", "en", "unknown"]
 
 # Publishers backfill timestamps and timezones drift; a day of slack keeps the

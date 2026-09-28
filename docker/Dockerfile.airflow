@@ -15,6 +15,14 @@ RUN apt-get update \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
+# The compose file mounts a named volume at the Hugging Face cache. Docker
+# seeds an empty named volume from the image directory - including its owner -
+# so the directory must exist here and belong to airflow. Otherwise the volume
+# is created root-owned, every model download fails with PermissionError and
+# sentiment scoring silently degrades to rating-only.
+RUN mkdir -p /opt/airflow/.cache/huggingface \
+ && chown -R airflow:root /opt/airflow/.cache
+
 USER airflow
 
 # ---------------------------------------------------------------------

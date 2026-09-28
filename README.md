@@ -56,7 +56,7 @@ leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
 
 | Lapisan | Teknologi | Perannya di sini |
 |---|---|---|
-| Ingestion | `feedparser`, `google-play-scraper`, `praw`, YouTube Data API, X API v2, `pytrends`, `googlemaps`, BeautifulSoup | 11 konektor, satu envelope dokumen |
+| Ingestion | `feedparser`, `google-play-scraper`, `praw`, YouTube Data API, X API v2, `pytrends`, `googlemaps`, BeautifulSoup (Kaskus, Maps), Selenium + Chromium headless (teks penuh artikel berita) | 11 konektor, satu envelope dokumen |
 | State & politeness | Redis | cooldown, checkpoint inkremental, circuit breaker |
 | Warehouse | PostgreSQL 16 | skema `raw` / `core` / `ops` |
 | Kualitas data | Great Expectations 1.x | gerbang yang memblokir, hasilnya dipersistensi |
@@ -158,7 +158,7 @@ manusia (`reviewed_label`) selalu menang atas label model di seluruh mart.
 19 kartu, dibuat otomatis oleh `python -m brilink.serving.metabase_provision`:
 
 **KPI** — total dokumen · Net Sentiment Score 30 hari · porsi negatif · ukuran antrean tinjauan
-**Tren** — NSS harian + rolling 7 hari · komposisi label per kanal
+**Tren** — volume & NSS mingguan (batang + garis) · komposisi label per kanal (hijau/abu/merah)
 **Aspek** — peringkat NSS per aspek · tren mingguan per aspek · matriks aspek × kanal
 **Sumber** — scorecard 30 vs 90 hari dengan delta
 **Aksi** — peringatan dini berbasis z-score · antrean tinjauan manual
@@ -169,6 +169,27 @@ freshness ingestion per konektor · snapshot gate terakhir
 
 Spesifikasinya adalah kode (`src/brilink/serving/dashboard_spec.py`), bisa
 direview di pull request, dan provisioning-nya idempoten.
+
+## Output CSV
+
+Selain dashboard, hasil analisis juga diekspor ke CSV di folder `./output`
+(otomatis di akhir DAG dan `make demo`, atau manual):
+
+```bash
+make export                          # semua data
+make export DAYS=30 PLATFORM=news    # 30 hari terakhir, kanal berita saja
+# tanpa make, saat stack berjalan:
+docker exec brilink_airflow_scheduler python -m brilink.serving.export_csv --output-dir /opt/airflow/output
+```
+
+| File | Isi |
+|---|---|
+| `sentimen_dokumen.csv` | satu baris per dokumen: tanggal, kanal, sumber, judul, **teks lengkap**, tautan, sentimen, skor, keyakinan, emosi, aspek positif/negatif, flag tinjauan |
+| `ringkasan_aspek.csv` | per aspek bisnis: jumlah dokumen, positif/netral/negatif, NSS |
+| `ringkasan_sumber.csv` | per kanal & sumber: volume, komposisi label, NSS, rata-rata keyakinan |
+
+File berformat UTF-8 (dengan BOM) agar teks Indonesia tampil benar di Excel.
+Jika Excel menggabungkan semua kolom jadi satu, tambahkan `--delimiter ";"`.
 
 ---
 
@@ -226,6 +247,7 @@ make demo          # pipeline sekali jalan, end-to-end
 make ingest CONNECTORS=rss,playstore
 make seed          # muat korpus sintetis
 make score         # skor dokumen yang belum dinilai
+make rejudge       # kirim antrean tinjauan ke LLM judge (sekali, setelah judge diaktifkan)
 make validate      # jalankan gerbang kualitas data
 make dbt           # dbt deps + run + test
 make dashboard     # provision ulang dashboard Metabase
@@ -245,6 +267,10 @@ Semua diatur lewat environment variable dengan default yang sudah berfungsi
 | `SENTIMENT_NEUTRAL_BAND` | `0.12` | lebar pita netral |
 | `SENTIMENT_REVIEW_CONFIDENCE_THRESHOLD` | `0.55` | ambang antrean tinjauan |
 | `SENTIMENT_MODEL_VERSION` | `brilink-ensemble-v2.0.0` | naikkan untuk memicu re-score bersih |
+| `SENTIMENT_ENABLE_LLM_JUDGE` | `false` | eskalasi dokumen berkeyakinan rendah ke LLM |
+| `SENTIMENT_LLM_PROVIDER` | `auto` | `auto` / `deepseek` / `anthropic` (auto = key yang terisi, DeepSeek dulu) |
+| `DEEPSEEK_API_KEY` | kosong | key DeepSeek untuk LLM judge |
+| `SENTIMENT_LLM_MAX_DOCUMENTS` | `300` | batas dokumen ke LLM per run (pengaman biaya) |
 | `INGEST_CONNECTORS` | `all` | daftar konektor yang dijalankan |
 | `INGEST_COOLDOWN_MINUTES` | `90` | jeda minimum antar-run per konektor |
 | `INGEST_SEED_FALLBACK` | `true` | isi otomatis bila sumber live kosong |

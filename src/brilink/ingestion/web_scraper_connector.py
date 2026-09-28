@@ -74,14 +74,19 @@ class WebScraperConnector(BaseConnector):
                     seen_urls.add(article_url)
 
                     title = entry.get("title", "")
-                    outlet = title.rsplit(" - ", 1)[-1].strip().lower() if " - " in title else "unknown"
+                    outlet = (
+                        title.rsplit(" - ", 1)[-1].strip().lower() if " - " in title else "unknown"
+                    )
                     published = _entry_datetime(entry)
                     if published and published < since:
                         continue
 
                     sleeper.wait()
-                    body = self._scrape_article(driver, article_url)
-                    if not body or not contains_any(f"{title} {body}", self.keywords):
+                    scraped = self._scrape_article(driver, article_url)
+                    if scraped is None:
+                        continue
+                    body, final_url = scraped
+                    if not contains_any(f"{title} {body}", self.keywords):
                         continue
 
                     doc_title = title.rsplit(" - ", 1)[0] if " - " in title else title
@@ -93,10 +98,15 @@ class WebScraperConnector(BaseConnector):
                         external_id=f"webscraper_{ext_id}",
                         title=doc_title,
                         body=body,
-                        url=article_url,
+                        url=final_url,
                         author=outlet,
                         published_at=published,
-                        raw_payload={"collector": "selenium-web-scraper", "outlet": outlet},
+                        raw_payload={
+                            "collector": "selenium-web-scraper",
+                            "outlet": outlet,
+                            "google_news_url": article_url,
+                            "domain": _extract_domain(final_url),
+                        },
                     )
                     emitted += 1
 
@@ -115,9 +125,35 @@ class WebScraperConnector(BaseConnector):
         options.add_argument("--disable-extensions")
         options.add_argument("--window-size=1366,768")
         options.add_argument(f"--user-agent={self.settings.ingestion.user_agent}")
-        return webdriver.Chrome(options=options)
+        # News pages are ad-heavy; waiting for every tracker to finish ("normal"
+        # strategy) routinely stalls the renderer past the timeout. The article
+        # text is in the DOM long before that, so stop at DOMContentLoaded.
+        options.page_load_strategy = "eager"
+        options.add_argument("--blink-settings=imagesEnabled=false")
 
-    def _scrape_article(self, driver, url: str) -> str | None:
+        # Prefer the distro Chromium + chromedriver baked into the image. Without
+        # this, Selenium Manager does not recognise the `chromium` binary as
+        # Chrome and tries to download Chrome for Testing at runtime.
+        binary = _first_existing(CHROMIUM_BINARIES)
+        if binary:
+            options.binary_location = binary
+        driver_path = _first_existing(CHROMEDRIVER_BINARIES)
+        try:
+            if driver_path:
+                from selenium.webdriver.chrome.service import Service
+
+                return webdriver.Chrome(service=Service(driver_path), options=options)
+            return webdriver.Chrome(options=options)
+        except Exception as exc:
+            raise ConnectorUnavailable(f"could not start headless Chrome: {exc}") from exc
+
+    def _scrape_article(self, driver, url: str) -> tuple[str, str] | None:
+        """Return ``(article_text, resolved_url)`` or ``None`` when unusable.
+
+        Google News RSS links are ``news.google.com/rss/articles/...`` redirects,
+        so outlet-specific selectors must be chosen from the URL the browser
+        lands on, not from the feed link.
+        """
         try:
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support import expected_conditions as ec
@@ -125,26 +161,54 @@ class WebScraperConnector(BaseConnector):
         except ImportError as exc:  # pragma: no cover
             raise ConnectorUnavailable(f"selenium not installed: {exc}") from exc
 
+        timeout = self.settings.ingestion.request_timeout_seconds
         try:
-            driver.set_page_load_timeout(self.settings.ingestion.request_timeout_seconds)
+            driver.set_page_load_timeout(timeout)
             driver.get(url)
-            WebDriverWait(driver, self.settings.ingestion.request_timeout_seconds).until(
+            WebDriverWait(driver, timeout).until(
+                lambda d: not _is_google_host(_extract_domain(d.current_url))
+            )
+            WebDriverWait(driver, timeout).until(
                 ec.presence_of_element_located((By.TAG_NAME, "body"))
             )
         except Exception as exc:
             logger.debug("Selenium article fetch failed %s: %s", url, exc)
             return None
 
-        _remove_unwanted_nodes(driver)
-        for selector in _selectors_for_domain(_extract_domain(url)):
-            text = _text_from_selector(driver, selector)
-            if len(text) > 200:
-                return text
+        # One slow or hostile page must cost one article, not the whole run.
+        try:
+            final_url = driver.current_url or url
+            domain = _extract_domain(final_url)
+            if _is_google_host(domain):
+                # Consent wall or unresolved redirect - no article text here.
+                return None
 
-        paragraph_text = _paragraph_text(driver)
-        if len(paragraph_text) > 200:
-            return paragraph_text
+            _remove_unwanted_nodes(driver)
+            for selector in _selectors_for_domain(domain):
+                text = _text_from_selector(driver, selector)
+                if len(text) > 200:
+                    return text, final_url
+
+            paragraph_text = _paragraph_text(driver)
+            if len(paragraph_text) > 200:
+                return paragraph_text, final_url
+        except Exception as exc:
+            logger.debug("Selenium article extraction failed %s: %s", url, exc)
         return None
+
+
+CHROMIUM_BINARIES = ("/usr/bin/chromium", "/usr/bin/chromium-browser")
+CHROMEDRIVER_BINARIES = ("/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver")
+
+
+def _first_existing(paths: tuple[str, ...]) -> str | None:
+    import os
+
+    return next((p for p in paths if os.path.exists(p)), None)
+
+
+def _is_google_host(domain: str) -> bool:
+    return domain == "google.com" or domain.endswith(".google.com")
 
 
 def _selectors_for_domain(domain: str) -> list[str]:
@@ -175,12 +239,14 @@ def _paragraph_text(driver) -> str:
 
 
 def _entry_datetime(entry) -> datetime | None:
-    import time as _time
+    import calendar
 
+    # feedparser normalises to a UTC struct_time; timegm (not mktime, which
+    # assumes local time) keeps it correct on hosts outside UTC.
     for key in ("published_parsed", "updated_parsed"):
         value = entry.get(key)
         if value:
-            return datetime.fromtimestamp(_time.mktime(value), tz=timezone.utc)
+            return datetime.fromtimestamp(calendar.timegm(value), tz=timezone.utc)
     return None
 
 

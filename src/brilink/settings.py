@@ -16,6 +16,7 @@ from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EngineMode = Literal["ensemble", "transformer_only"]
+LLMProvider = Literal["auto", "deepseek", "anthropic"]
 
 
 class DatabaseSettings(BaseSettings):
@@ -124,6 +125,7 @@ class CredentialSettings(BaseSettings):
     google_maps_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
 
 
 class SentimentSettings(BaseSettings):
@@ -135,6 +137,15 @@ class SentimentSettings(BaseSettings):
     enable_transformer: bool = True
     enable_emotion: bool = True
     enable_llm_judge: bool = False
+    # "auto" uses whichever API key is configured, DeepSeek first.
+    llm_provider: LLMProvider = "auto"
+    # Empty = the provider default (see brilink.nlp.llm_judge.DEFAULT_MODELS).
+    llm_model: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 3
+    # Hard cap on LLM calls per scoring run, so a large re-score can't run up a bill.
+    llm_max_documents: int = 300
     batch_size: int = 16
     max_tokens: int = 384
     # Sliding-window chunking for long articles.

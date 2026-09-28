@@ -15,7 +15,13 @@ from brilink.ingestion.expanded_rss_connector import ExpandedRSSConnector
 from brilink.ingestion.google_maps_connector import GoogleMapsConnector, _parse_ts, hashlib_md5
 from brilink.ingestion.google_trends_connector import GoogleTrendsConnector
 from brilink.ingestion.kaskus_connector import KaskusConnector
-from brilink.ingestion.web_scraper_connector import WebScraperConnector, _extract_domain
+from brilink.ingestion.web_scraper_connector import (
+    GENERIC_SELECTORS,
+    WebScraperConnector,
+    _extract_domain,
+    _is_google_host,
+    _selectors_for_domain,
+)
 
 NOW = datetime.now(timezone.utc)
 
@@ -73,6 +79,24 @@ def test_google_maps_hashlib_md5_is_stable():
 def test_web_scraper_extract_domain():
     assert _extract_domain("https://finance.detik.com/ekonomi/d-1") == "finance.detik.com"
     assert _extract_domain("http://www.kompas.com/artikel") == "www.kompas.com"
+
+
+def test_web_scraper_treats_google_redirects_as_unresolved():
+    # Google News RSS links are redirects; an article must never be extracted
+    # while the browser is still on a Google host (redirect or consent wall).
+    assert _is_google_host("news.google.com")
+    assert _is_google_host("consent.google.com")
+    assert _is_google_host("google.com")
+    assert not _is_google_host("finance.detik.com")
+    assert not _is_google_host("notgoogle.com")
+
+
+def test_web_scraper_uses_outlet_selectors_for_resolved_domain():
+    detik = _selectors_for_domain("finance.detik.com")
+    assert detik[0] == "div.detail_text"
+    assert detik[-len(GENERIC_SELECTORS) :] == GENERIC_SELECTORS
+    # The unresolved redirect host gets only the generic fallbacks.
+    assert _selectors_for_domain("news.google.com") == GENERIC_SELECTORS
 
 
 def test_kaskus_connector_metadata():

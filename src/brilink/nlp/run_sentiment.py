@@ -32,6 +32,21 @@ SELECT_UNSCORED = """
     LIMIT %(limit)s
 """
 
+# Documents already scored (before the LLM judge was switched on) that are still
+# waiting for a human and have never been seen by the judge. A human label
+# always wins, so those are left alone.
+SELECT_REVIEW_WITHOUT_LLM = """
+    SELECT d.document_id, d.title, d.body, d.rating, d.source_platform
+    FROM core.document_sentiment s
+    JOIN raw.documents d ON d.document_id = s.document_id
+    WHERE s.requires_review
+      AND s.reviewed_label IS NULL
+      AND COALESCE((s.signals -> 'llm_judge' ->> 'available')::boolean, false) = false
+      AND (COALESCE(d.title, '') <> '' OR COALESCE(d.body, '') <> '')
+    ORDER BY d.published_at DESC NULLS LAST
+    LIMIT %(limit)s
+"""
+
 SENTIMENT_COLUMNS = (
     "document_id",
     "sentiment_label",
@@ -84,6 +99,12 @@ def fetch_unscored(limit: int, model_version: str) -> list[dict]:
     from ..db import fetch_all
 
     return fetch_all(SELECT_UNSCORED, {"limit": limit, "model_version": model_version})
+
+
+def fetch_review_without_llm(limit: int) -> list[dict]:
+    from ..db import fetch_all
+
+    return fetch_all(SELECT_REVIEW_WITHOUT_LLM, {"limit": limit})
 
 
 def persist(scores: Sequence[DocumentScore], neutral_band: float) -> tuple[int, int]:
@@ -162,6 +183,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override the configured engine mode",
     )
+    parser.add_argument(
+        "--rejudge-review",
+        action="store_true",
+        help=(
+            "Re-score documents still in the review queue that the LLM judge has "
+            "never seen (use once after enabling SENTIMENT_ENABLE_LLM_JUDGE)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -175,8 +204,15 @@ def main(argv: list[str] | None = None) -> int:
     synced = sync_aspect_dimension()
     logger.info("Aspect dimension synchronised (%d rows)", synced)
 
-    pending = fetch_unscored(limit, settings.sentiment.model_version)
-    logger.info("Found %d documents to score", len(pending))
+    if args.rejudge_review:
+        if not settings.sentiment.enable_llm_judge:
+            logger.error("--rejudge-review needs SENTIMENT_ENABLE_LLM_JUDGE=true")
+            return 2
+        pending = fetch_review_without_llm(limit)
+        logger.info("Found %d review-queue documents for the LLM judge", len(pending))
+    else:
+        pending = fetch_unscored(limit, settings.sentiment.model_version)
+        logger.info("Found %d documents to score", len(pending))
     if not pending:
         print(json.dumps({"scored": 0, "aspects": 0}))
         return 0
@@ -224,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
         "model_version": settings.sentiment.model_version,
         "engine_mode": settings.sentiment.engine_mode,
     }
+    if engine.judge.enabled:
+        summary["llm_judge"] = engine.judge.stats()
+    engine.judge.close()
     logger.info("Sentiment stage finished", extra=summary)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
