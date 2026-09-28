@@ -30,15 +30,30 @@ class PlayStoreConnector(BaseConnector):
     platform = "playstore"
     description = "Google Play reviews for BRImo and BRILink Mobile"
 
+    @property
+    def apps(self) -> dict[str, str]:
+        """Apps selected by ``INGEST_PLAYSTORE_APPS`` (aliases from ``PLAY_APPS``)."""
+        wanted = {
+            a.strip().lower()
+            for a in self.settings.ingestion.playstore_apps.split(",")
+            if a.strip()
+        }
+        return {alias: pkg for alias, pkg in PLAY_APPS.items() if alias in wanted}
+
     def fetch(self, since: datetime, limit: int) -> Iterable[Document]:
         try:
             from google_play_scraper import Sort, reviews
         except ImportError as exc:  # pragma: no cover
             raise ConnectorUnavailable(f"google-play-scraper not installed: {exc}") from exc
 
-        per_app = max(limit // max(len(PLAY_APPS), 1), 50)
+        apps = self.apps
+        if not apps:
+            raise ConnectorUnavailable(
+                f"INGEST_PLAYSTORE_APPS matches no known app (known: {', '.join(PLAY_APPS)})"
+            )
+        per_app = max(limit // len(apps), 50)
 
-        for app_alias, package in PLAY_APPS.items():
+        for app_alias, package in apps.items():
             token = None
             collected = 0
             while collected < per_app:

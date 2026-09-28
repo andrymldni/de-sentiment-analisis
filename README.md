@@ -78,7 +78,7 @@ leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
 | `playstore` | Ulasan | — | BRImo & BRILink Mobile, membawa rating bintang |
 | `appstore` | Ulasan | — | storefront Indonesia |
 | `reddit` | Sosial | client id/secret | r/indonesia, r/finansial + komentarnya |
-| `youtube` | Sosial | API key | komentar pada video BRILink |
+| `youtube` | Sosial | API key | komentar yang menyebut BRILink di channel resmi Bank BRI (@bank_bri) |
 | `twitter` | Sosial | bearer token | pencarian recent, bahasa Indonesia |
 | `kaskus` | Forum | — | thread & balasan forum Kaskus soal BRILink |
 | `google_trends` | Search | — | minat pencarian BRILink per waktu & provinsi |
@@ -191,6 +191,27 @@ docker exec brilink_airflow_scheduler python -m brilink.serving.export_csv --out
 File berformat UTF-8 (dengan BOM) agar teks Indonesia tampil benar di Excel.
 Jika Excel menggabungkan semua kolom jadi satu, tambahkan `--delimiter ";"`.
 
+## Backfill data historis
+
+Run terjadwal hanya mengambil data baru (checkpoint + 90 hari pertama).
+Untuk menarik riwayat panjang sekali jalan, pakai `--since`:
+
+```bash
+docker exec brilink_airflow_scheduler python -m brilink.ingestion.run_ingestion \
+  --connectors rss,youtube,playstore --since 2019-01-01 --limit 20000 --force
+docker exec brilink_airflow_scheduler python -m brilink.nlp.run_sentiment
+```
+
+Mode backfill tidak menggeser checkpoint, tidak memasang cooldown, dan tidak
+memicu circuit breaker, jadi jadwal 6-jam tetap berjalan seperti biasa.
+
+| Konektor | Jangkauan ke belakang |
+|---|---|
+| `rss` | Google News dipecah per bulan (`after:`/`before:`); hanya judul + cuplikan |
+| `youtube` | seluruh komentar channel resmi yang menyebut BRILink |
+| `playstore` | BRILink Mobile sampai 2019; BRImo (~150 ulasan/hari) praktis hanya ~2 minggu per 2.000 ulasan — batasi dengan `INGEST_PLAYSTORE_APPS` |
+| konektor lain | tidak mendukung riwayat (RSS outlet, App Store, Kaskus, Trends) |
+
 ---
 
 ## Model data
@@ -273,6 +294,8 @@ Semua diatur lewat environment variable dengan default yang sudah berfungsi
 | `SENTIMENT_LLM_MAX_DOCUMENTS` | `300` | batas dokumen ke LLM per run (pengaman biaya) |
 | `INGEST_CONNECTORS` | `all` | daftar konektor yang dijalankan |
 | `INGEST_COOLDOWN_MINUTES` | `90` | jeda minimum antar-run per konektor |
+| `INGEST_YOUTUBE_CHANNEL_IDS` | `UCRHFE_ooDrkEiRRJbog3EjA` | ID channel YouTube yang komentarnya diambil (default: Bank BRI resmi) |
+| `INGEST_PLAYSTORE_APPS` | `brimo,brilink_mobile` | aplikasi Google Play yang ulasannya diambil |
 | `INGEST_SEED_FALLBACK` | `true` | isi otomatis bila sumber live kosong |
 | `INSTALL_TORCH` (build arg) | `true` | `false` menghasilkan image ~2 GB lebih kecil |
 

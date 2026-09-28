@@ -90,6 +90,15 @@ class IngestionSettings(BaseSettings):
         "brilink,agen brilink,agen bri,laku pandai bri,bri link,"
         "branchless banking bri,agen laku pandai"
     )
+    # YouTube channels whose comments are read (comma separated channel IDs).
+    # Default: the official Bank BRI channel, @bank_bri. Look-alike channels
+    # named "BANK BRI" exist and are scam/impersonation accounts - use IDs,
+    # never display names.
+    youtube_channel_ids: str = "UCRHFE_ooDrkEiRRJbog3EjA"
+    # Google Play apps whose reviews are read (comma separated aliases from
+    # store_connectors.PLAY_APPS). BRImo gets ~150 reviews a day, so a long
+    # backfill is only practical with "brilink_mobile" alone.
+    playstore_apps: str = "brimo,brilink_mobile"
     lookback_days: int = 14
     initial_lookback_days: int = 90
     max_items_per_connector: int = 400

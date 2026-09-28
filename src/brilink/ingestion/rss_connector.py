@@ -17,9 +17,9 @@ can never leak into the corpus.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Iterable
-from datetime import datetime, timezone
+import calendar
+from collections.abc import Iterable, Iterator
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlparse
 
 from ..logging_config import get_logger
@@ -30,6 +30,12 @@ from .base import BaseConnector, ConnectorUnavailable, Document
 logger = get_logger(__name__)
 
 GOOGLE_NEWS_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=id&gl=ID&ceid=ID:id"
+
+# Google News caps a query at ~100 items. Windows longer than BACKFILL_AFTER
+# are fetched month by month (see ``_google_news_backfill``).
+GOOGLE_NEWS_CAP = 100
+BACKFILL_AFTER = timedelta(days=45)
+MIN_BACKFILL_WINDOW = timedelta(days=7)
 
 # Indonesian outlets that publish on generic/commercial TLDs (.com, .co) and
 # therefore cannot be matched by the ".id" ccTLD rule below. Verified working
@@ -189,16 +195,16 @@ class RSSConnector(BaseConnector):
         sleeper = PoliteSleeper(self.settings.ingestion.request_delay_seconds)
         emitted = 0
 
-        for keyword in self.keywords:
+        if self._now() - since > BACKFILL_AFTER:
+            google_docs = self._google_news_backfill(feedparser, since, sleeper)
+        else:
+            google_docs = self._google_news_recent(feedparser, since, sleeper)
+
+        for doc in google_docs:
+            yield doc
+            emitted += 1
             if emitted >= limit:
                 return
-            url = GOOGLE_NEWS_TEMPLATE.format(query=quote_plus(f'"{keyword}"'))
-            sleeper.wait()
-            for doc in self._parse_feed(feedparser, url, since, source_hint=None):
-                yield doc
-                emitted += 1
-                if emitted >= limit:
-                    return
 
         for outlet, url in DIRECT_FEEDS.items():
             if emitted >= limit:
@@ -212,6 +218,66 @@ class RSSConnector(BaseConnector):
                 if emitted >= limit:
                     return
 
+    def _google_news_recent(self, feedparser, since: datetime, sleeper) -> Iterator[Document]:
+        """One query per keyword - enough for an incremental window."""
+        for keyword in self.keywords:
+            url = GOOGLE_NEWS_TEMPLATE.format(query=quote_plus(f'"{keyword}"'))
+            sleeper.wait()
+            yield from self._parse_feed(feedparser, url, since, source_hint=None)
+
+    def _google_news_backfill(self, feedparser, since: datetime, sleeper) -> Iterator[Document]:
+        """Long history as date-sliced queries, newest window first.
+
+        A Google News query returns at most ~100 items, so a single query over
+        years would only ever see the latest 100. Each calendar month is asked
+        for separately with ``after:``/``before:``; a month that hits the cap
+        is split in half until it fits or is down to ``MIN_BACKFILL_WINDOW``.
+        """
+        terms = " OR ".join(f'"{k}"' for k in self.keywords)
+        pending = _month_windows(since.date(), self._now().date() + timedelta(days=1))
+        seen: set[str] = set()
+        requests = 0
+
+        while pending:
+            start, end = pending.pop()
+            query = f"({terms}) after:{start.isoformat()} before:{end.isoformat()}"
+            url = GOOGLE_NEWS_TEMPLATE.format(query=quote_plus(query))
+            sleeper.wait()
+            requests += 1
+            entries = self._load_entries(feedparser, url)
+
+            if len(entries) >= GOOGLE_NEWS_CAP and end - start > MIN_BACKFILL_WINDOW:
+                middle = start + timedelta(days=(end - start).days // 2)
+                # Pushed so the newer half is popped (processed) first.
+                pending.extend([(start, middle), (middle, end)])
+                continue
+
+            for doc in self._entries_to_docs(entries, url, since, source_hint=None):
+                if doc.external_id in seen:
+                    continue
+                seen.add(doc.external_id)
+                yield doc
+
+        logger.info("Google News backfill: %d queries, %d unique articles", requests, len(seen))
+
+    def _load_entries(self, feedparser, url: str) -> list:
+        try:
+            parsed = feedparser.parse(url, agent=self.settings.ingestion.user_agent)
+        except Exception as exc:
+            logger.warning("RSS fetch failed for %s: %s", url, exc)
+            return []
+
+        status = getattr(parsed, "status", None) or parsed.get("status")
+        if isinstance(status, int) and status >= 400:
+            # Throttling shows up here; an empty page would otherwise look like
+            # "no news that month".
+            logger.warning("RSS feed returned HTTP %s: %s", status, url)
+            return []
+        if getattr(parsed, "bozo", 0) and not parsed.entries:
+            logger.warning("RSS feed unusable: %s", url)
+            return []
+        return list(parsed.entries)
+
     def _parse_feed(
         self,
         feedparser,
@@ -220,17 +286,18 @@ class RSSConnector(BaseConnector):
         source_hint: str | None,
         keyword_filter: bool = False,
     ) -> Iterable[Document]:
-        try:
-            parsed = feedparser.parse(url, agent=self.settings.ingestion.user_agent)
-        except Exception as exc:
-            logger.warning("RSS fetch failed for %s: %s", url, exc)
-            return
+        entries = self._load_entries(feedparser, url)
+        yield from self._entries_to_docs(entries, url, since, source_hint, keyword_filter)
 
-        if getattr(parsed, "bozo", 0) and not parsed.entries:
-            logger.warning("RSS feed unusable: %s", url)
-            return
-
-        for entry in parsed.entries:
+    def _entries_to_docs(
+        self,
+        entries: list,
+        url: str,
+        since: datetime,
+        source_hint: str | None,
+        keyword_filter: bool = False,
+    ) -> Iterator[Document]:
+        for entry in entries:
             title = entry.get("title")
             summary = entry.get("summary") or entry.get("description")
             link = entry.get("link")
@@ -267,11 +334,28 @@ class RSSConnector(BaseConnector):
             )
 
 
+def _month_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Calendar-month ``[start, end)`` windows, oldest first."""
+    windows: list[tuple[date, date]] = []
+    cursor = start
+    while cursor < end:
+        following = (
+            date(cursor.year + 1, 1, 1)
+            if cursor.month == 12
+            else date(cursor.year, cursor.month + 1, 1)
+        )
+        windows.append((cursor, min(following, end)))
+        cursor = following
+    return windows
+
+
 def _entry_datetime(entry) -> datetime | None:
+    # feedparser normalises to a UTC struct_time; timegm (not mktime, which
+    # assumes local time) keeps it correct on hosts outside UTC.
     for key in ("published_parsed", "updated_parsed"):
         value = entry.get(key)
         if value:
-            return datetime.fromtimestamp(time.mktime(value), tz=timezone.utc)
+            return datetime.fromtimestamp(calendar.timegm(value), tz=timezone.utc)
     return None
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
 from ..logging_config import configure_logging, get_logger
 from ..settings import get_settings
@@ -12,6 +13,18 @@ from .orchestrator import IngestionOrchestrator
 from .registry import catalog
 
 logger = get_logger(__name__)
+
+
+def _parse_since(value: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if moment > datetime.now(timezone.utc):
+        raise argparse.ArgumentTypeError(f"--since {value} is in the future")
+    return moment
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,7 +41,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit non-zero when no documents were ingested at all",
     )
+    parser.add_argument(
+        "--since",
+        type=_parse_since,
+        default=None,
+        help=(
+            "Backfill from this date (YYYY-MM-DD, UTC) instead of the incremental "
+            "checkpoint. Leaves checkpoint, cooldown and circuit breaker untouched."
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max documents per connector this run (default: INGEST_MAX_ITEMS_PER_CONNECTOR)",
+    )
     args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be a positive integer")
 
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_json)
@@ -37,7 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(catalog(), indent=2, ensure_ascii=False))
         return 0
 
-    reports = IngestionOrchestrator(settings).run(args.connectors, force=args.force)
+    reports = IngestionOrchestrator(settings).run(
+        args.connectors, force=args.force, since=args.since, limit=args.limit
+    )
     summary = [r.as_dict() for r in reports]
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 

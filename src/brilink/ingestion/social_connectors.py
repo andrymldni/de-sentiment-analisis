@@ -7,8 +7,9 @@ run log explains exactly why a source contributed nothing.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
+from typing import Any
 
 from ..logging_config import get_logger
 from ..utils.ratelimit import PoliteSleeper
@@ -18,7 +19,6 @@ from .base import BaseConnector, ConnectorUnavailable, Document
 logger = get_logger(__name__)
 
 SUBREDDITS = ("indonesia", "finansial", "IndonesiaFinance", "indonesias")
-YOUTUBE_SEARCH_TERMS = ("agen BRILink", "BRILink penipuan", "cara daftar BRILink")
 
 
 class RedditConnector(BaseConnector):
@@ -105,10 +105,32 @@ class RedditConnector(BaseConnector):
 
 
 class YouTubeConnector(BaseConnector):
+    """Comments mentioning BRILink, read straight from the official BRI channel.
+
+    One ``commentThreads`` call with ``allThreadsRelatedToChannelId`` covers
+    every video on the channel, so a comment posted today on a months-old
+    video is still found - unlike searching for recently *uploaded* videos.
+    ``searchTerms`` narrows the stream server-side; the keyword check here is
+    the authority, because the API's matching is looser than ours.
+
+    Comments written by the channel itself (BRI's own replies) are dropped:
+    they are the bank talking, not customer sentiment.
+    """
+
     name = "youtube"
     platform = "youtube"
-    description = "Comment threads on Indonesian BRILink videos"
+    description = "Comments mentioning BRILink on the official Bank BRI YouTube channel"
     requires_credentials = ("youtube_api_key",)
+
+    # Safety cap per search term; the ``since`` cut-off normally stops far earlier.
+    MAX_PAGES_PER_TERM = 20
+    # videos.list accepts at most 50 ids per call.
+    VIDEO_BATCH = 50
+
+    @property
+    def channel_ids(self) -> list[str]:
+        raw = self.settings.ingestion.youtube_channel_ids
+        return [c.strip() for c in raw.split(",") if c.strip()]
 
     def fetch(self, since: datetime, limit: int) -> Iterable[Document]:
         try:
@@ -116,81 +138,141 @@ class YouTubeConnector(BaseConnector):
         except ImportError as exc:  # pragma: no cover
             raise ConnectorUnavailable(f"google-api-python-client not installed: {exc}") from exc
 
+        if not self.channel_ids:
+            raise ConnectorUnavailable("INGEST_YOUTUBE_CHANNEL_IDS is empty")
+
         youtube = build(
             "youtube",
             "v3",
             developerKey=self.settings.credentials.youtube_api_key,
             cache_discovery=False,
         )
+        yield from self._fetch_with(youtube, since, limit)
+
+    def _fetch_with(self, youtube: Any, since: datetime, limit: int) -> Iterator[Document]:
         sleeper = PoliteSleeper(self.settings.ingestion.request_delay_seconds)
-        emitted = 0
+        candidates: list[tuple[str, dict, str]] = []  # (comment id, snippet, channel id)
+        seen: set[str] = set()
+        succeeded = failed = 0
 
-        for term in YOUTUBE_SEARCH_TERMS:
-            if emitted >= limit:
-                return
-            sleeper.wait()
-            try:
-                search = (
-                    youtube.search()
-                    .list(
-                        q=term,
-                        part="id,snippet",
-                        type="video",
-                        maxResults=10,
-                        relevanceLanguage="id",
-                        regionCode="ID",
-                        publishedAfter=since.astimezone(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                    )
-                    .execute()
-                )
-            except Exception as exc:
-                logger.warning("YouTube search failed for %r: %s", term, exc)
-                continue
-
-            for item in search.get("items", []):
-                video_id = item["id"]["videoId"]
-                video_title = item["snippet"]["title"]
-                if emitted >= limit:
-                    return
-                sleeper.wait()
+        for channel_id in self.channel_ids:
+            for term in self.keywords:
+                if len(candidates) >= limit:
+                    break
                 try:
-                    threads = (
-                        youtube.commentThreads()
-                        .list(
-                            videoId=video_id,
-                            part="snippet",
-                            maxResults=100,
-                            textFormat="plainText",
-                            order="time",
-                        )
-                        .execute()
-                    )
+                    for thread in self._threads(youtube, channel_id, term, since, sleeper):
+                        for comment_id, snippet in _thread_comments(thread):
+                            if comment_id in seen or len(candidates) >= limit:
+                                continue
+                            if not self._is_customer_mention(snippet, channel_id, since):
+                                continue
+                            seen.add(comment_id)
+                            candidates.append((comment_id, snippet, channel_id))
+                    succeeded += 1
                 except Exception as exc:
-                    logger.debug("Comments disabled for %s: %s", video_id, exc)
-                    continue
-
-                for thread in threads.get("items", []):
-                    if emitted >= limit:
-                        return
-                    snippet = thread["snippet"]["topLevelComment"]["snippet"]
-                    text = snippet.get("textDisplay", "")
-                    if not contains_any(text, self.keywords):
-                        continue
-                    yield Document(
-                        source_platform=self.platform,
-                        source_name=f"youtube:{video_id}",
-                        external_id=thread["id"],
-                        title=video_title,
-                        body=text,
-                        url=f"https://www.youtube.com/watch?v={video_id}",
-                        author=snippet.get("authorDisplayName"),
-                        published_at=_iso(snippet.get("publishedAt")),
-                        engagement={"likes": snippet.get("likeCount", 0)},
-                        raw_payload={"video_id": video_id, "collector": "youtube-data-api"},
+                    failed += 1
+                    logger.warning(
+                        "YouTube comment search failed (channel=%s, term=%r): %s",
+                        channel_id,
+                        term,
+                        exc,
                     )
-                    emitted += 1
+
+        if failed and not succeeded:
+            # Every request failed (bad key, quota, API disabled): report a failed
+            # run instead of a silent "success, 0 rows".
+            raise RuntimeError(f"all {failed} YouTube comment searches failed; see logs")
+
+        titles = self._video_titles(youtube, {s.get("videoId", "") for _, s, _ in candidates})
+        for comment_id, snippet, channel_id in candidates:
+            video_id = snippet.get("videoId", "")
+            yield Document(
+                source_platform=self.platform,
+                source_name=f"youtube:{video_id}",
+                external_id=comment_id,
+                # The video title stays out of the scored text: BRI's own
+                # promotional wording would bias the comment's sentiment.
+                title=None,
+                body=snippet.get("textOriginal") or snippet.get("textDisplay"),
+                url=f"https://www.youtube.com/watch?v={video_id}&lc={comment_id}",
+                author=snippet.get("authorDisplayName"),
+                published_at=_iso(snippet.get("publishedAt")),
+                engagement={"likes": snippet.get("likeCount", 0)},
+                raw_payload={
+                    "video_id": video_id,
+                    "video_title": titles.get(video_id),
+                    "channel_id": channel_id,
+                    "is_reply": "." in comment_id,
+                    "collector": "youtube-data-api",
+                },
+            )
+
+    def _threads(
+        self, youtube: Any, channel_id: str, term: str, since: datetime, sleeper: PoliteSleeper
+    ) -> Iterator[dict]:
+        """Channel comment threads matching ``term``, newest first, down to ``since``."""
+        page_token = None
+        for _ in range(self.MAX_PAGES_PER_TERM):
+            sleeper.wait()
+            params = {
+                "part": "snippet,replies",
+                "allThreadsRelatedToChannelId": channel_id,
+                "searchTerms": term,
+                "order": "time",
+                "maxResults": 100,
+                "textFormat": "plainText",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            response = youtube.commentThreads().list(**params).execute()
+
+            for thread in response.get("items", []):
+                top = thread["snippet"]["topLevelComment"]["snippet"]
+                published = _iso(top.get("publishedAt"))
+                if published and published < since:
+                    return
+                yield thread
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                return
+
+    def _is_customer_mention(self, snippet: dict, channel_id: str, since: datetime) -> bool:
+        author_channel = (snippet.get("authorChannelId") or {}).get("value")
+        if author_channel == channel_id:
+            return False
+        published = _iso(snippet.get("publishedAt"))
+        if published and published < since:
+            return False
+        text = snippet.get("textOriginal") or snippet.get("textDisplay") or ""
+        return contains_any(text, self.keywords)
+
+    def _video_titles(self, youtube: Any, video_ids: set[str]) -> dict[str, str]:
+        """Best-effort lookup; a missing title never blocks ingestion."""
+        ids = sorted(v for v in video_ids if v)
+        titles: dict[str, str] = {}
+        for start in range(0, len(ids), self.VIDEO_BATCH):
+            batch = ids[start : start + self.VIDEO_BATCH]
+            try:
+                response = youtube.videos().list(part="snippet", id=",".join(batch)).execute()
+            except Exception as exc:
+                logger.warning("YouTube video title lookup failed: %s", exc)
+                continue
+            for item in response.get("items", []):
+                titles[item["id"]] = item["snippet"].get("title", "")
+        return titles
+
+
+def _thread_comments(thread: dict) -> Iterator[tuple[str, dict]]:
+    """The top-level comment plus the replies the API embeds (up to 5).
+
+    Reply ids are ``<thread id>.<suffix>``, so they never collide with a
+    thread id and dedupe naturally on ``doc_uid``.
+    """
+    top = thread["snippet"]["topLevelComment"]
+    yield top["id"], top["snippet"]
+    for reply in (thread.get("replies") or {}).get("comments", []):
+        yield reply["id"], reply["snippet"]
 
 
 class TwitterConnector(BaseConnector):

@@ -70,9 +70,24 @@ class IngestionOrchestrator:
         self.store = store or StateStore()
 
     # ------------------------------------------------------------------
-    def run(self, connector_names: str | None = None, force: bool = False) -> list[RunReport]:
+    def run(
+        self,
+        connector_names: str | None = None,
+        force: bool = False,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[RunReport]:
+        """Run the selected connectors.
+
+        ``since`` switches to *backfill* mode: the window starts at that moment
+        instead of the incremental checkpoint, and neither the checkpoint nor
+        the cooldown is touched, so scheduled runs carry on exactly as before.
+        ``limit`` overrides the per-connector item budget.
+        """
         connectors = resolve(connector_names, self.settings)
-        reports = [self._run_connector(c, force=force) for c in connectors]
+        reports = [
+            self._run_connector(c, force=force, since=since, limit=limit) for c in connectors
+        ]
 
         if self._should_seed(connectors, reports):
             logger.warning(
@@ -112,13 +127,24 @@ class IngestionOrchestrator:
         return int((row or {}).get("n", 0)) == 0
 
     # ------------------------------------------------------------------
-    def _run_connector(self, connector: BaseConnector, force: bool) -> RunReport:
+    def _run_connector(
+        self,
+        connector: BaseConnector,
+        force: bool,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> RunReport:
         run_id = str(uuid.uuid4())
         report = RunReport(connector=connector.name, run_id=run_id, status="running")
 
         cooldown = Cooldown(self.store, connector.name, self.settings.ingestion.cooldown_minutes)
         breaker = CircuitBreaker(self.store, connector.name)
         checkpoint = Checkpoint(self.store, connector.name)
+
+        # A backfill is a one-off manual pull of history. It must not move the
+        # incremental checkpoint, arm the cooldown or trip the circuit breaker,
+        # otherwise it would change what the next scheduled run does.
+        backfill = since is not None
 
         missing = connector.missing_credentials()
         if missing:
@@ -130,17 +156,20 @@ class IngestionOrchestrator:
         if not force and breaker.is_open():
             return self._finish(report, "skipped_circuit_open", "circuit breaker open")
 
-        since = self._resolve_since(checkpoint)
-        self._record_run(report, since)
+        window_start = since if backfill else self._resolve_since(checkpoint)
+        budget = limit or connector.max_items
+        self._record_run(report, window_start)
 
         try:
-            documents = list(connector.collect(since, connector.max_items))
+            documents = list(connector.collect(window_start, budget))
         except ConnectorUnavailable as exc:
-            breaker.record_failure()
+            if not backfill:
+                breaker.record_failure()
             return self._finish(report, "unavailable", str(exc))
         except Exception as exc:
             logger.exception("Connector %s failed", connector.name)
-            breaker.record_failure()
+            if not backfill:
+                breaker.record_failure()
             return self._finish(report, "failed", str(exc))
 
         report.fetched = len(documents)
@@ -149,10 +178,15 @@ class IngestionOrchestrator:
         if kept:
             report.inserted = self._persist(kept, run_id)
             newest = max((d.published_at for d in kept if d.published_at), default=None)
-            if newest:
+            if newest and not backfill:
                 # Rewind slightly: publishers backfill timestamps, and a hard
                 # high-water mark would silently drop late arrivals.
                 checkpoint.write(newest - timedelta(hours=6))
+
+        if backfill:
+            return self._finish(
+                report, "success", f"backfill since {window_start.date().isoformat()}"
+            )
 
         breaker.record_success()
         cooldown.arm()
