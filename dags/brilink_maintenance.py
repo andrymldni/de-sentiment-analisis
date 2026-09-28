@@ -56,12 +56,16 @@ with DAG(
         )
         return {"model_version": version, "unscored": int((row or {}).get("n", 0))}
 
+    # One -c per statement: psql sends a multi-statement -c string as a single
+    # query, which the server runs as an implicit transaction block, and VACUUM
+    # refuses to run inside one ("VACUUM cannot run inside a transaction block").
     vacuum = BashOperator(
         task_id="vacuum_analyze",
         bash_command=(
             'psql "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:'
-            '$POSTGRES_PORT/$POSTGRES_DB" -c "VACUUM ANALYZE raw.documents; '
-            'VACUUM ANALYZE core.document_sentiment;"'
+            '$POSTGRES_PORT/$POSTGRES_DB" -v ON_ERROR_STOP=1 '
+            '-c "VACUUM ANALYZE raw.documents" '
+            '-c "VACUUM ANALYZE core.document_sentiment"'
         ),
     )
 
