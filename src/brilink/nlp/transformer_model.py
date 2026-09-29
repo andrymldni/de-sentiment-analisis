@@ -128,9 +128,9 @@ class _BasePipeline:
         for start in range(0, len(texts), self.batch_size):
             batch = list(texts[start : start + self.batch_size])
             for prediction in pipe(batch):
-                if isinstance(prediction, dict):
-                    prediction = [prediction]
-                out.append({p["label"]: float(p["score"]) for p in prediction})
+                # A single-label pipeline returns a dict, a top_k one a list of dicts.
+                labels = [prediction] if isinstance(prediction, dict) else prediction
+                out.append({p["label"]: float(p["score"]) for p in labels})
         return out
 
 

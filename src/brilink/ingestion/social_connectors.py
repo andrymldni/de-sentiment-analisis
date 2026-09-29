@@ -19,6 +19,10 @@ from .base import BaseConnector, ConnectorUnavailable, Document
 logger = get_logger(__name__)
 
 SUBREDDITS = ("indonesia", "finansial", "IndonesiaFinance", "indonesias")
+MAX_COMMENTS_PER_SUBMISSION = 25
+
+# (comment id, comment snippet, channel id) - a YouTube comment awaiting emission.
+YouTubeCandidate = tuple[str, dict, str]
 
 
 class RedditConnector(BaseConnector):
@@ -58,50 +62,59 @@ class RedditConnector(BaseConnector):
             for submission in submissions:
                 if emitted >= limit:
                     return
-                created = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
+                created = _from_epoch(submission.created_utc)
                 if created < since:
                     continue
 
+                yield self._submission_document(submission, subreddit_name, created)
+                emitted += 1
+
+                for document in self._comment_documents(submission, subreddit_name):
+                    if emitted >= limit:
+                        return
+                    yield document
+                    emitted += 1
+
+    def _submission_document(
+        self, submission: Any, subreddit_name: str, created: datetime
+    ) -> Document:
+        return Document(
+            source_platform=self.platform,
+            source_name=f"r/{subreddit_name}",
+            external_id=f"t3_{submission.id}",
+            title=submission.title,
+            body=submission.selftext,
+            url=f"https://reddit.com{submission.permalink}",
+            author=_author_name(submission.author),
+            published_at=created,
+            engagement={"score": submission.score, "comments": submission.num_comments},
+            raw_payload={"kind": "submission", "collector": "praw"},
+        )
+
+    def _comment_documents(self, submission: Any, subreddit_name: str) -> Iterator[Document]:
+        """Keyword-matching comments under ``submission``.
+
+        Comment expansion is best effort: a failure ends this submission's
+        comments but never the subreddit scan.
+        """
+        try:
+            submission.comments.replace_more(limit=0)
+            for comment in submission.comments.list()[:MAX_COMMENTS_PER_SUBMISSION]:
+                if not contains_any(comment.body or "", self.keywords):
+                    continue
                 yield Document(
                     source_platform=self.platform,
                     source_name=f"r/{subreddit_name}",
-                    external_id=f"t3_{submission.id}",
-                    title=submission.title,
-                    body=submission.selftext,
-                    url=f"https://reddit.com{submission.permalink}",
-                    author=str(submission.author) if submission.author else None,
-                    published_at=created,
-                    engagement={
-                        "score": submission.score,
-                        "comments": submission.num_comments,
-                    },
-                    raw_payload={"kind": "submission", "collector": "praw"},
+                    external_id=f"t1_{comment.id}",
+                    body=comment.body,
+                    url=f"https://reddit.com{submission.permalink}{comment.id}/",
+                    author=_author_name(comment.author),
+                    published_at=_from_epoch(comment.created_utc),
+                    engagement={"score": comment.score},
+                    raw_payload={"kind": "comment", "collector": "praw"},
                 )
-                emitted += 1
-
-                try:
-                    submission.comments.replace_more(limit=0)
-                    for comment in submission.comments.list()[:25]:
-                        if emitted >= limit:
-                            return
-                        if not contains_any(comment.body or "", self.keywords):
-                            continue
-                        yield Document(
-                            source_platform=self.platform,
-                            source_name=f"r/{subreddit_name}",
-                            external_id=f"t1_{comment.id}",
-                            body=comment.body,
-                            url=f"https://reddit.com{submission.permalink}{comment.id}/",
-                            author=str(comment.author) if comment.author else None,
-                            published_at=datetime.fromtimestamp(
-                                comment.created_utc, tz=timezone.utc
-                            ),
-                            engagement={"score": comment.score},
-                            raw_payload={"kind": "comment", "collector": "praw"},
-                        )
-                        emitted += 1
-                except Exception as exc:
-                    logger.debug("Comment expansion failed: %s", exc)
+        except Exception as exc:
+            logger.debug("Comment expansion failed: %s", exc)
 
 
 class YouTubeConnector(BaseConnector):
@@ -150,8 +163,17 @@ class YouTubeConnector(BaseConnector):
         yield from self._fetch_with(youtube, since, limit)
 
     def _fetch_with(self, youtube: Any, since: datetime, limit: int) -> Iterator[Document]:
+        candidates = self._collect_candidates(youtube, since, limit)
+        titles = self._video_titles(youtube, {s.get("videoId", "") for _, s, _ in candidates})
+        for candidate in candidates:
+            yield self._comment_document(candidate, titles)
+
+    def _collect_candidates(
+        self, youtube: Any, since: datetime, limit: int
+    ) -> list[YouTubeCandidate]:
+        """Unique customer comments across every (channel, term) search, up to ``limit``."""
         sleeper = PoliteSleeper(self.settings.ingestion.request_delay_seconds)
-        candidates: list[tuple[str, dict, str]] = []  # (comment id, snippet, channel id)
+        candidates: list[YouTubeCandidate] = []
         seen: set[str] = set()
         succeeded = failed = 0
 
@@ -160,14 +182,13 @@ class YouTubeConnector(BaseConnector):
                 if len(candidates) >= limit:
                     break
                 try:
-                    for thread in self._threads(youtube, channel_id, term, since, sleeper):
-                        for comment_id, snippet in _thread_comments(thread):
-                            if comment_id in seen or len(candidates) >= limit:
-                                continue
-                            if not self._is_customer_mention(snippet, channel_id, since):
-                                continue
-                            seen.add(comment_id)
-                            candidates.append((comment_id, snippet, channel_id))
+                    for comment_id, snippet in self._term_mentions(
+                        youtube, channel_id, term, since, sleeper
+                    ):
+                        if comment_id in seen or len(candidates) >= limit:
+                            continue
+                        seen.add(comment_id)
+                        candidates.append((comment_id, snippet, channel_id))
                     succeeded += 1
                 except Exception as exc:
                     failed += 1
@@ -182,30 +203,40 @@ class YouTubeConnector(BaseConnector):
             # Every request failed (bad key, quota, API disabled): report a failed
             # run instead of a silent "success, 0 rows".
             raise RuntimeError(f"all {failed} YouTube comment searches failed; see logs")
+        return candidates
 
-        titles = self._video_titles(youtube, {s.get("videoId", "") for _, s, _ in candidates})
-        for comment_id, snippet, channel_id in candidates:
-            video_id = snippet.get("videoId", "")
-            yield Document(
-                source_platform=self.platform,
-                source_name=f"youtube:{video_id}",
-                external_id=comment_id,
-                # The video title stays out of the scored text: BRI's own
-                # promotional wording would bias the comment's sentiment.
-                title=None,
-                body=snippet.get("textOriginal") or snippet.get("textDisplay"),
-                url=f"https://www.youtube.com/watch?v={video_id}&lc={comment_id}",
-                author=snippet.get("authorDisplayName"),
-                published_at=_iso(snippet.get("publishedAt")),
-                engagement={"likes": snippet.get("likeCount", 0)},
-                raw_payload={
-                    "video_id": video_id,
-                    "video_title": titles.get(video_id),
-                    "channel_id": channel_id,
-                    "is_reply": "." in comment_id,
-                    "collector": "youtube-data-api",
-                },
-            )
+    def _term_mentions(
+        self, youtube: Any, channel_id: str, term: str, since: datetime, sleeper: PoliteSleeper
+    ) -> Iterator[tuple[str, dict]]:
+        """Customer comments (top-level and embedded replies) matching one search term."""
+        for thread in self._threads(youtube, channel_id, term, since, sleeper):
+            for comment_id, snippet in _thread_comments(thread):
+                if self._is_customer_mention(snippet, channel_id, since):
+                    yield comment_id, snippet
+
+    def _comment_document(self, candidate: YouTubeCandidate, titles: dict[str, str]) -> Document:
+        comment_id, snippet, channel_id = candidate
+        video_id = snippet.get("videoId", "")
+        return Document(
+            source_platform=self.platform,
+            source_name=f"youtube:{video_id}",
+            external_id=comment_id,
+            # The video title stays out of the scored text: BRI's own
+            # promotional wording would bias the comment's sentiment.
+            title=None,
+            body=snippet.get("textOriginal") or snippet.get("textDisplay"),
+            url=f"https://www.youtube.com/watch?v={video_id}&lc={comment_id}",
+            author=snippet.get("authorDisplayName"),
+            published_at=_iso(snippet.get("publishedAt")),
+            engagement={"likes": snippet.get("likeCount", 0)},
+            raw_payload={
+                "video_id": video_id,
+                "video_title": titles.get(video_id),
+                "channel_id": channel_id,
+                "is_reply": "." in comment_id,
+                "collector": "youtube-data-api",
+            },
+        )
 
     def _threads(
         self, youtube: Any, channel_id: str, term: str, since: datetime, sleeper: PoliteSleeper
@@ -350,3 +381,11 @@ def _iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _from_epoch(seconds: float) -> datetime:
+    return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+
+def _author_name(author: Any) -> str | None:
+    return str(author) if author else None

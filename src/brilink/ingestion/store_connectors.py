@@ -7,13 +7,19 @@ sentiment engine (and, in aggregate, a sanity check on it).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
+from typing import Any
 
 from ..logging_config import get_logger
 from .base import BaseConnector, ConnectorUnavailable, Document
 
 logger = get_logger(__name__)
+
+# Floor per app, so a small global limit still yields a useful sample of each.
+MIN_REVIEWS_PER_APP = 50
+# google-play-scraper returns at most this many reviews per request.
+PLAY_PAGE_SIZE = 200
 
 # BRI's consumer app and the agent-facing app. Both surface BRILink experience.
 PLAY_APPS: dict[str, str] = {
@@ -51,59 +57,67 @@ class PlayStoreConnector(BaseConnector):
             raise ConnectorUnavailable(
                 f"INGEST_PLAYSTORE_APPS matches no known app (known: {', '.join(PLAY_APPS)})"
             )
-        per_app = max(limit // len(apps), 50)
-
+        per_app = max(limit // len(apps), MIN_REVIEWS_PER_APP)
         for app_alias, package in apps.items():
-            token = None
-            collected = 0
-            while collected < per_app:
-                try:
-                    batch, token = reviews(
-                        package,
-                        lang="id",
-                        country="id",
-                        sort=Sort.NEWEST,
-                        count=min(200, per_app - collected),
-                        continuation_token=token,
-                    )
-                except Exception as exc:
-                    logger.warning("Play Store fetch failed for %s: %s", package, exc)
-                    break
+            yield from self._app_reviews(reviews, Sort.NEWEST, app_alias, package, since, per_app)
 
-                if not batch:
-                    break
+    def _app_reviews(
+        self,
+        reviews: Callable[..., Any],
+        newest: Any,
+        app_alias: str,
+        package: str,
+        since: datetime,
+        budget: int,
+    ) -> Iterator[Document]:
+        """Page one app's reviews newest-first until ``since``, ``budget`` or the last page."""
+        token = None
+        collected = 0
+        while collected < budget:
+            try:
+                batch, token = reviews(
+                    package,
+                    lang="id",
+                    country="id",
+                    sort=newest,
+                    count=min(PLAY_PAGE_SIZE, budget - collected),
+                    continuation_token=token,
+                )
+            except Exception as exc:
+                logger.warning("Play Store fetch failed for %s: %s", package, exc)
+                return
 
-                stop = False
-                for review in batch:
-                    published = review.get("at")
-                    if published and published.tzinfo is None:
-                        published = published.replace(tzinfo=timezone.utc)
-                    if published and published < since:
-                        stop = True
-                        break
+            for review in batch:
+                published = _as_utc(review.get("at"))
+                if published and published < since:
+                    return
+                yield self._review_document(review, app_alias, package, published)
+                collected += 1
 
-                    yield Document(
-                        source_platform=self.platform,
-                        source_name=app_alias,
-                        external_id=str(review.get("reviewId")),
-                        title=None,
-                        body=review.get("content"),
-                        url=f"https://play.google.com/store/apps/details?id={package}",
-                        author=review.get("userName"),
-                        rating=review.get("score"),
-                        published_at=published,
-                        engagement={"thumbs_up": review.get("thumbsUpCount", 0)},
-                        raw_payload={
-                            "package": package,
-                            "app_version": review.get("reviewCreatedVersion"),
-                            "reply": bool(review.get("replyContent")),
-                            "collector": "google-play-scraper",
-                        },
-                    )
-                    collected += 1
+            if not batch or token is None:
+                return
 
-                if stop or token is None:
-                    break
+    def _review_document(
+        self, review: dict, app_alias: str, package: str, published: datetime | None
+    ) -> Document:
+        return Document(
+            source_platform=self.platform,
+            source_name=app_alias,
+            external_id=str(review.get("reviewId")),
+            title=None,
+            body=review.get("content"),
+            url=f"https://play.google.com/store/apps/details?id={package}",
+            author=review.get("userName"),
+            rating=review.get("score"),
+            published_at=published,
+            engagement={"thumbs_up": review.get("thumbsUpCount", 0)},
+            raw_payload={
+                "package": package,
+                "app_version": review.get("reviewCreatedVersion"),
+                "reply": bool(review.get("replyContent")),
+                "collector": "google-play-scraper",
+            },
+        )
 
 
 class AppStoreConnector(BaseConnector):
@@ -117,7 +131,7 @@ class AppStoreConnector(BaseConnector):
         except ImportError as exc:  # pragma: no cover
             raise ConnectorUnavailable(f"app-store-web-scraper not installed: {exc}") from exc
 
-        per_app = max(limit // max(len(APPSTORE_APPS), 1), 50)
+        per_app = max(limit // max(len(APPSTORE_APPS), 1), MIN_REVIEWS_PER_APP)
 
         for alias, app_id in APPSTORE_APPS.items():
             try:
@@ -130,9 +144,7 @@ class AppStoreConnector(BaseConnector):
             for index, review in enumerate(iterator):
                 if index >= per_app:
                     break
-                published = getattr(review, "date", None)
-                if published and published.tzinfo is None:
-                    published = published.replace(tzinfo=timezone.utc)
+                published = _as_utc(getattr(review, "date", None))
                 if published and published < since:
                     break
 
@@ -148,3 +160,10 @@ class AppStoreConnector(BaseConnector):
                     published_at=published,
                     raw_payload={"app_id": app_id, "collector": "app-store-web-scraper"},
                 )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Scrapers return naive UTC datetimes; make them comparable with `since`."""
+    if value and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value

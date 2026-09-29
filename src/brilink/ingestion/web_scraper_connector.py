@@ -9,10 +9,11 @@ Strategy:
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 from collections.abc import Iterable
 from datetime import datetime, timezone
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from ..logging_config import get_logger
 from ..utils.ratelimit import PoliteSleeper
@@ -73,42 +74,51 @@ class WebScraperConnector(BaseConnector):
                         continue
                     seen_urls.add(article_url)
 
-                    title = entry.get("title", "")
-                    outlet = (
-                        title.rsplit(" - ", 1)[-1].strip().lower() if " - " in title else "unknown"
-                    )
-                    published = _entry_datetime(entry)
-                    if published and published < since:
-                        continue
+                    document = self._entry_document(driver, entry, article_url, since, sleeper)
+                    if document is not None:
+                        yield document
+                        emitted += 1
 
-                    sleeper.wait()
-                    scraped = self._scrape_article(driver, article_url)
-                    if scraped is None:
-                        continue
-                    body, final_url = scraped
-                    if not contains_any(f"{title} {body}", self.keywords):
-                        continue
+    def _entry_document(
+        self,
+        driver,
+        entry: dict,
+        article_url: str,
+        since: datetime,
+        sleeper: PoliteSleeper,
+    ) -> Document | None:
+        """Scrape one feed entry; ``None`` when it is too old, unreachable or off-topic."""
+        title = entry.get("title", "")
+        headline, outlet = _split_title(title)
+        published = _entry_datetime(entry)
+        if published and published < since:
+            return None
 
-                    doc_title = title.rsplit(" - ", 1)[0] if " - " in title else title
-                    ext_id = hashlib.sha256(article_url.encode()).hexdigest()[:16]
+        sleeper.wait()
+        scraped = self._scrape_article(driver, article_url)
+        if scraped is None:
+            return None
+        body, final_url = scraped
+        if not contains_any(f"{title} {body}", self.keywords):
+            return None
 
-                    yield Document(
-                        source_platform=self.platform,
-                        source_name=outlet,
-                        external_id=f"webscraper_{ext_id}",
-                        title=doc_title,
-                        body=body,
-                        url=final_url,
-                        author=outlet,
-                        published_at=published,
-                        raw_payload={
-                            "collector": "selenium-web-scraper",
-                            "outlet": outlet,
-                            "google_news_url": article_url,
-                            "domain": _extract_domain(final_url),
-                        },
-                    )
-                    emitted += 1
+        ext_id = hashlib.sha256(article_url.encode()).hexdigest()[:16]
+        return Document(
+            source_platform=self.platform,
+            source_name=outlet,
+            external_id=f"webscraper_{ext_id}",
+            title=headline,
+            body=body,
+            url=final_url,
+            author=outlet,
+            published_at=published,
+            raw_payload={
+                "collector": "selenium-web-scraper",
+                "outlet": outlet,
+                "google_news_url": article_url,
+                "domain": _extract_domain(final_url),
+            },
+        )
 
     def _browser(self):
         try:
@@ -239,8 +249,6 @@ def _paragraph_text(driver) -> str:
 
 
 def _entry_datetime(entry) -> datetime | None:
-    import calendar
-
     # feedparser normalises to a UTC struct_time; timegm (not mktime, which
     # assumes local time) keeps it correct on hosts outside UTC.
     for key in ("published_parsed", "updated_parsed"):
@@ -250,7 +258,13 @@ def _entry_datetime(entry) -> datetime | None:
     return None
 
 
-def _extract_domain(url: str) -> str:
-    from urllib.parse import urlparse
+def _split_title(title: str) -> tuple[str, str]:
+    """Split a Google News ``"Headline - Outlet"`` title into (headline, outlet)."""
+    if " - " not in title:
+        return title, "unknown"
+    headline, outlet = title.rsplit(" - ", 1)
+    return headline, outlet.strip().lower()
 
+
+def _extract_domain(url: str) -> str:
     return urlparse(url).netloc.lower()

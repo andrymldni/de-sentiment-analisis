@@ -351,7 +351,7 @@ class SeedConnector(BaseConnector):
             opposite = NEGATIVE_CLAUSES if polarity == "positive" else POSITIVE_CLAUSES
             aspect = self.rng.choice(list(opposite))
             body = f"{body.rstrip('.')}, tapi {self.rng.choice(opposite[aspect])}."
-            aspects = list(aspects) + [aspect]
+            aspects = [*aspects, aspect]
 
         body += self.rng.choice(REVIEW_CLOSERS)
         app = self.rng.choice(["brimo", "brilink_mobile"]) if platform == "playstore" else "brimo"

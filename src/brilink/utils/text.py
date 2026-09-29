@@ -230,13 +230,11 @@ def split_clauses(text: str, min_length: int = 3) -> list[str]:
     otherwise the positive remark about the agent and the negative remark about
     the network collapse into a single, meaningless average.
     """
-    segments: list[str] = []
-    for sentence in split_sentences(text, min_length=1) or ([text] if text else []):
-        for clause in CLAUSE_RE.split(sentence):
-            clause = (clause or "").strip()
-            if len(clause) >= min_length:
-                segments.append(clause)
-    return segments
+    sentences = split_sentences(text, min_length=1) or ([text] if text else [])
+    clauses = (
+        (clause or "").strip() for sentence in sentences for clause in CLAUSE_RE.split(sentence)
+    )
+    return [clause for clause in clauses if len(clause) >= min_length]
 
 
 def emoji_polarity(text: str) -> tuple[int, int]:

@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from ..db import as_jsonb, bulk_upsert, get_connection
+from ..db import as_jsonb, bulk_upsert, fetch_one, get_connection
 from ..logging_config import get_logger, safe_extra
 from ..settings import Settings, get_settings
 from ..utils.ratelimit import Checkpoint, CircuitBreaker, Cooldown, StateStore
@@ -30,6 +30,9 @@ logger = get_logger(__name__)
 
 NEAR_DUPLICATE_THRESHOLD = 4
 RELEVANCE_FLOOR = 1e-9  # news must mention at least one keyword
+# Publishers backfill timestamps, so the checkpoint is rewound by this much;
+# a hard high-water mark would silently drop late arrivals.
+CHECKPOINT_REWIND = timedelta(hours=6)
 
 
 @dataclass
@@ -45,6 +48,11 @@ class RunReport:
     finished_at: datetime | None = None
     message: str | None = None
 
+    @property
+    def duration_seconds(self) -> float:
+        end = self.finished_at or datetime.now(timezone.utc)
+        return round((end - self.started_at).total_seconds(), 2)
+
     def as_dict(self) -> dict:
         return {
             "connector": self.connector,
@@ -54,12 +62,7 @@ class RunReport:
             "inserted": self.inserted,
             "duplicates": self.duplicates,
             "irrelevant": self.irrelevant,
-            "duration_s": round(
-                (
-                    (self.finished_at or datetime.now(timezone.utc)) - self.started_at
-                ).total_seconds(),
-                2,
-            ),
+            "duration_s": self.duration_seconds,
             "message": self.message,
         }
 
@@ -117,8 +120,6 @@ class IngestionOrchestrator:
         if sum(r.inserted for r in reports) > 0:
             return False
 
-        from ..db import fetch_one
-
         try:
             row = fetch_one("SELECT COUNT(*) AS n FROM raw.documents")
         except Exception:
@@ -134,8 +135,7 @@ class IngestionOrchestrator:
         since: datetime | None = None,
         limit: int | None = None,
     ) -> RunReport:
-        run_id = str(uuid.uuid4())
-        report = RunReport(connector=connector.name, run_id=run_id, status="running")
+        report = RunReport(connector=connector.name, run_id=str(uuid.uuid4()), status="running")
 
         cooldown = Cooldown(self.store, connector.name, self.settings.ingestion.cooldown_minutes)
         breaker = CircuitBreaker(self.store, connector.name)
@@ -146,51 +146,70 @@ class IngestionOrchestrator:
         # otherwise it would change what the next scheduled run does.
         backfill = since is not None
 
-        missing = connector.missing_credentials()
-        if missing:
-            return self._finish(report, "skipped_no_credentials", f"missing: {', '.join(missing)}")
-        if not force and cooldown.active():
-            return self._finish(
-                report, "skipped_cooldown", f"cooldown active for {cooldown.remaining()}s"
-            )
-        if not force and breaker.is_open():
-            return self._finish(report, "skipped_circuit_open", "circuit breaker open")
+        skip = self._skip_reason(connector, cooldown, breaker, force)
+        if skip:
+            return self._finish(report, *skip)
 
         window_start = since if backfill else self._resolve_since(checkpoint)
-        budget = limit or connector.max_items
         self._record_run(report, window_start)
 
         try:
-            documents = list(connector.collect(window_start, budget))
+            documents = list(connector.collect(window_start, limit or connector.max_items))
         except ConnectorUnavailable as exc:
-            if not backfill:
-                breaker.record_failure()
-            return self._finish(report, "unavailable", str(exc))
+            return self._fail(report, breaker, "unavailable", exc, backfill=backfill)
         except Exception as exc:
             logger.exception("Connector %s failed", connector.name)
-            if not backfill:
-                breaker.record_failure()
-            return self._finish(report, "failed", str(exc))
+            return self._fail(report, breaker, "failed", exc, backfill=backfill)
 
         report.fetched = len(documents)
         kept = self._filter(connector, documents, report)
-
         if kept:
-            report.inserted = self._persist(kept, run_id)
-            newest = max((d.published_at for d in kept if d.published_at), default=None)
-            if newest and not backfill:
-                # Rewind slightly: publishers backfill timestamps, and a hard
-                # high-water mark would silently drop late arrivals.
-                checkpoint.write(newest - timedelta(hours=6))
+            report.inserted = self._persist(kept, report.run_id)
 
         if backfill:
             return self._finish(
                 report, "success", f"backfill since {window_start.date().isoformat()}"
             )
 
+        self._advance_checkpoint(checkpoint, kept)
         breaker.record_success()
         cooldown.arm()
         return self._finish(report, "success")
+
+    @staticmethod
+    def _skip_reason(
+        connector: BaseConnector, cooldown: Cooldown, breaker: CircuitBreaker, force: bool
+    ) -> tuple[str, str] | None:
+        """``(status, message)`` when the connector must not run now, else ``None``."""
+        missing = connector.missing_credentials()
+        if missing:
+            return "skipped_no_credentials", f"missing: {', '.join(missing)}"
+        if force:
+            return None
+        if cooldown.active():
+            return "skipped_cooldown", f"cooldown active for {cooldown.remaining()}s"
+        if breaker.is_open():
+            return "skipped_circuit_open", "circuit breaker open"
+        return None
+
+    def _fail(
+        self,
+        report: RunReport,
+        breaker: CircuitBreaker,
+        status: str,
+        error: Exception,
+        *,
+        backfill: bool,
+    ) -> RunReport:
+        if not backfill:
+            breaker.record_failure()
+        return self._finish(report, status, str(error))
+
+    @staticmethod
+    def _advance_checkpoint(checkpoint: Checkpoint, documents: Sequence[Document]) -> None:
+        newest = max((d.published_at for d in documents if d.published_at), default=None)
+        if newest:
+            checkpoint.write(newest - CHECKPOINT_REWIND)
 
     # ------------------------------------------------------------------
     def _resolve_since(self, checkpoint: Checkpoint) -> datetime:
