@@ -7,3 +7,5 @@ python-dotenv
 tenacity
 orjson
 httpx
+# LLM judge, Anthropic provider (SENTIMENT_LLM_PROVIDER=anthropic)
+anthropic>=2.0

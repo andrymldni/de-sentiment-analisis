@@ -34,10 +34,14 @@ logger = get_logger(__name__)
 
 DEFAULT_MODELS = {
     "deepseek": "deepseek-flash",
-    "anthropic": "claude-haiku-4-5-20251001",
+    "anthropic": "claude-haiku-5-5",
 }
 MAX_INPUT_CHARS = 2500
 MAX_OUTPUT_TOKENS = 200
+# Claude Haiku 5.5 thinks adaptively before answering and that thinking counts
+# toward max_tokens, so the Anthropic cap leaves room for it; the JSON reply
+# itself is still ~60 tokens.
+ANTHROPIC_MAX_OUTPUT_TOKENS = 1024
 VALID_LABELS = ("positive", "neutral", "negative")
 LABEL_ALIASES = {"positif": "positive", "negatif": "negative", "netral": "neutral"}
 # Used when the model returns a label but no usable score.
@@ -238,7 +242,11 @@ class _AnthropicBackend:
         try:
             response = self._client.messages.create(
                 model=self.model,
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=ANTHROPIC_MAX_OUTPUT_TOKENS,
+                # A three-way label needs little deliberation; low effort keeps
+                # the call cheap while still letting the model think when the
+                # text is genuinely ambiguous.
+                output_config={"effort": "low"},
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
             )
@@ -253,7 +261,19 @@ class _AnthropicBackend:
         usage = getattr(response, "usage", None)
         self.prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
         self.completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
-        return response.content[0].text if response.content else ""
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            # Safety classifier declined this document; the same text will be
+            # declined again, so retrying would only spend tokens.
+            raise LLMCallError("Anthropic declined the request (refusal)", retryable=False)
+
+        # The response can open with thinking blocks, so pick text by type
+        # rather than by position.
+        return "".join(
+            block.text
+            for block in (response.content or [])
+            if getattr(block, "type", None) == "text"
+        )
 
     def close(self) -> None:
         return None

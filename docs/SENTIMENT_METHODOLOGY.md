@@ -182,7 +182,7 @@ Provider dipilih lewat `SENTIMENT_LLM_PROVIDER`:
 | Provider | Key | Model default | Catatan |
 |---|---|---|---|
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` | API format OpenAI via `httpx`, JSON mode, thinking mode dimatikan |
-| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` | butuh `pip install anthropic` di image |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` | SDK `anthropic` sudah termasuk di `requirements/base.txt`; thinking adaptif dengan effort `low` |
 
 `auto` (default) memakai key yang terisi, DeepSeek lebih dulu. Pengaman:
 

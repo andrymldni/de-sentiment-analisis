@@ -5,17 +5,20 @@ No test here touches the network: DeepSeek calls go through
 """
 
 import json
+import types
 
 import httpx
 import pytest
 
 from brilink.nlp.ensemble import EnsembleSentimentEngine, ScoreInput
 from brilink.nlp.llm_judge import (
+    ANTHROPIC_MAX_OUTPUT_TOKENS,
     DEFAULT_MODELS,
     MAX_INPUT_CHARS,
     SYSTEM_PROMPT,
     LLMCallError,
     LLMJudge,
+    _AnthropicBackend,
     _DeepSeekBackend,
     parse_verdict,
 )
@@ -217,6 +220,86 @@ def test_deepseek_bad_request_is_not_retried():
     assert not judge.judge(["teks"])[0].available
     assert len(calls) == 1
     assert judge.available, "a 400 is per-request, the judge stays on"
+
+
+# ----------------------------------------------------------------------
+# Anthropic wire format (SDK client replaced by a scripted fake)
+# ----------------------------------------------------------------------
+class _Block:
+    def __init__(self, type, text=None):
+        self.type = type
+        if text is not None:
+            self.text = text
+
+
+class _Response:
+    def __init__(self, content, stop_reason="end_turn", input_tokens=90, output_tokens=40):
+        self.content = content
+        self.stop_reason = stop_reason
+        self.usage = types.SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def anthropic_backend(response):
+    """An ``_AnthropicBackend`` whose SDK client records the request and
+    returns ``response`` (or raises it). No ``anthropic`` import needed."""
+    seen = {}
+
+    def create(**kwargs):
+        seen.update(kwargs)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    backend = _AnthropicBackend.__new__(_AnthropicBackend)
+    backend.model = DEFAULT_MODELS["anthropic"]
+    backend.prompt_tokens = backend.completion_tokens = 0
+    backend._client = types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
+    return backend, seen
+
+
+def test_anthropic_request_targets_current_haiku_with_room_for_thinking():
+    backend, seen = anthropic_backend(
+        _Response([_Block("thinking"), _Block("text", NEGATIVE_REPLY)])
+    )
+    verdict = make_judge(backend).judge(["Agen BRILink bawa kabur uang nasabah"])[0]
+
+    assert seen["model"] == "claude-haiku-5-5"
+    assert seen["max_tokens"] == ANTHROPIC_MAX_OUTPUT_TOKENS >= 1024
+    assert seen["output_config"] == {"effort": "low"}
+    assert seen["system"] == SYSTEM_PROMPT
+    assert seen["messages"] == [{"role": "user", "content": "Agen BRILink bawa kabur uang nasabah"}]
+    for forbidden in ("temperature", "top_p", "top_k", "thinking"):
+        assert forbidden not in seen
+
+    # The thinking block comes first; the verdict must still be read.
+    assert verdict.available and verdict.label == "negative"
+    assert verdict.model == "claude-haiku-5-5"
+    assert (backend.prompt_tokens, backend.completion_tokens) == (90, 40)
+
+
+def test_anthropic_refusal_is_not_retried_and_keeps_the_judge_on():
+    backend, _ = anthropic_backend(_Response([_Block("thinking")], stop_reason="refusal"))
+    judge = make_judge(backend, llm_max_retries=3)
+
+    with pytest.raises(LLMCallError) as excinfo:
+        backend.complete("teks")
+    assert not excinfo.value.retryable and not excinfo.value.fatal
+
+    assert not judge.judge(["teks"])[0].available
+    assert judge.available, "a refusal is per-document, the judge stays on"
+
+
+def test_anthropic_sdk_errors_map_status_codes_like_deepseek():
+    class FakeStatusError(Exception):
+        def __init__(self, status_code):
+            super().__init__(f"HTTP {status_code}")
+            self.status_code = status_code
+
+    for status, retryable, fatal in ((429, True, False), (401, False, True), (400, False, False)):
+        backend, _ = anthropic_backend(FakeStatusError(status))
+        with pytest.raises(LLMCallError) as excinfo:
+            backend.complete("teks")
+        assert (excinfo.value.retryable, excinfo.value.fatal) == (retryable, fatal), status
 
 
 # ----------------------------------------------------------------------
