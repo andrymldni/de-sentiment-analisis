@@ -3,8 +3,9 @@
     ingest.* (parallel per connector)
         -> data_quality_gate
             -> score_sentiment
-                -> dbt_deps -> dbt_run -> dbt_test
+                -> dbt_run -> dbt_test
                     -> provision_dashboard + export_csv (parallel)
+                    -> dbt_docs_generate (best effort, never gates serving)
 
 Design notes
 ------------
@@ -60,7 +61,8 @@ DEFAULT_ARGS = {
 DOC_MD = """
 ### BRILink Sentiment Pipeline
 
-Multi-source ingestion (news via RSS only) -> data-quality gate -> ensemble
+Multi-source ingestion (11 connectors: news RSS and full-text scraping, app
+stores, forums, social, search trends) -> data-quality gate -> ensemble
 sentiment scoring (IndoBERT + emotion + rating + aspect) -> dbt
 transformations and tests -> auto-provisioned Metabase dashboard.
 
@@ -95,10 +97,6 @@ with DAG(
     # 1. Ingestion - one task per connector, isolated failure domains
     # ------------------------------------------------------------------
     with TaskGroup(group_id="ingest", tooltip="Per-connector ingestion") as ingest:
-
-        @task(task_id="noop_placeholder")
-        def _placeholder() -> None:  # pragma: no cover - never scheduled
-            return None
 
         def _make_ingest_task(connector_name: str):
             @task(task_id=connector_name, retries=1, trigger_rule=TriggerRule.ALL_DONE)
@@ -158,13 +156,18 @@ with DAG(
     # ------------------------------------------------------------------
     @task(task_id="data_quality_gate")
     def data_quality_gate() -> dict:
+        from airflow.operators.python import get_current_context
+
         from brilink.logging_config import configure_logging
         from brilink.quality.validate import run as run_validation
         from brilink.settings import get_settings
 
         settings = get_settings()
         configure_logging(settings.log_level, settings.log_json)
-        return run_validation(hours=24, min_rows=1, dag_run_id="{{ run_id }}")
+        # Jinja only renders operator template fields, not strings inside a
+        # TaskFlow body, so the run id has to come from the runtime context.
+        run_id = str(get_current_context()["run_id"])
+        return run_validation(hours=24, min_rows=1, dag_run_id=run_id)
 
     # ------------------------------------------------------------------
     # 3. Sentiment scoring
@@ -228,13 +231,9 @@ with DAG(
     consolidated = consolidate_ingestion()
     gate = data_quality_gate()
 
-    (
-        start
-        >> ingest
-        >> consolidated
-        >> gate
-        >> score_sentiment
-        >> transform
-        >> [provision_dashboard, export_csv]
-        >> end
-    )
+    start >> ingest >> consolidated >> gate >> score_sentiment >> transform
+
+    # Serving hangs off dbt_test itself, not off the TaskGroup. The group's
+    # leaf is dbt_docs_generate (ALL_DONE), which succeeds even when the tests
+    # fail and would otherwise let the dashboard refresh from a failed build.
+    dbt_test >> [provision_dashboard, export_csv] >> end

@@ -47,16 +47,20 @@ class PlayStoreConnector(BaseConnector):
         return {alias: pkg for alias, pkg in PLAY_APPS.items() if alias in wanted}
 
     def fetch(self, since: datetime, limit: int) -> Iterable[Document]:
-        try:
-            from google_play_scraper import Sort, reviews
-        except ImportError as exc:  # pragma: no cover
-            raise ConnectorUnavailable(f"google-play-scraper not installed: {exc}") from exc
-
+        # Configuration errors are reported before environment errors: a bad
+        # app selection is the same mistake whether or not the scraper is
+        # installed, and the message should say so.
         apps = self.apps
         if not apps:
             raise ConnectorUnavailable(
                 f"INGEST_PLAYSTORE_APPS matches no known app (known: {', '.join(PLAY_APPS)})"
             )
+
+        try:
+            from google_play_scraper import Sort, reviews
+        except ImportError as exc:  # pragma: no cover
+            raise ConnectorUnavailable(f"google-play-scraper not installed: {exc}") from exc
+
         per_app = max(limit // len(apps), MIN_REVIEWS_PER_APP)
         for app_alias, package in apps.items():
             yield from self._app_reviews(reviews, Sort.NEWEST, app_alias, package, since, per_app)
