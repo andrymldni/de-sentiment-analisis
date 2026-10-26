@@ -63,7 +63,7 @@ leksikon sebagai fallback. Lihat `docs/SENTIMENT_METHODOLOGY.md` bagian 8.
 | NLP | IndoBERT + model emosi | ensemble 4 sinyal + ABSA 8 aspek |
 | Transformasi | dbt 1.8 | 5 staging · 2 intermediate · 9 mart · 79 test, tanpa paket eksternal |
 | Orkestrasi | Airflow 2.9 | TaskGroup, kegagalan terisolasi, retry eksponensial |
-| BI | Metabase | 19 kartu, di-provision lewat API sebagai kode |
+| BI | Metabase | 22 kartu, di-provision lewat API sebagai kode |
 | Delivery | Docker Compose, GitHub Actions | 5 job CI termasuk uji warehouse sungguhan |
 
 ---
@@ -155,7 +155,7 @@ manusia (`reviewed_label`) selalu menang atas label model di seluruh mart.
 
 ## Dashboard
 
-19 kartu, dibuat otomatis oleh `python -m brilink.serving.metabase_provision`:
+22 kartu, dibuat otomatis oleh `python -m brilink.serving.metabase_provision`:
 
 **KPI** — total dokumen · Net Sentiment Score · porsi negatif · ukuran antrean tinjauan
 **Tren** — volume & NSS bulanan (batang + garis) · komposisi label per kanal (hijau/abu/merah)

@@ -8,7 +8,7 @@ run log explains exactly why a source contributed nothing.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..logging_config import get_logger
@@ -312,7 +312,14 @@ class TwitterConnector(BaseConnector):
     description = "Recent X/Twitter posts mentioning BRILink"
     requires_credentials = ("twitter_bearer_token",)
 
-    ENDPOINT = "https://api.twitter.com/2/tweets/search/recent"
+    ENDPOINT = "https://api.x.com/2/tweets/search/recent"
+    # Recent search only reaches back 7 days; X rejects an older start_time
+    # with HTTP 400, so the window is clamped just inside that limit.
+    SEARCH_WINDOW = timedelta(days=7) - timedelta(minutes=5)
+    MAX_RESULTS_PER_PAGE = 100
+    # Account-level refusals (wrong app/project, no access, no credits):
+    # retrying cannot help, so they surface as "unavailable" with X's reason.
+    ACCESS_ERRORS = frozenset({401, 402, 403})
 
     def fetch(self, since: datetime, limit: int) -> Iterable[Document]:
         try:
@@ -324,54 +331,94 @@ class TwitterConnector(BaseConnector):
             "Authorization": f"Bearer {self.settings.credentials.twitter_bearer_token}",
             "User-Agent": self.settings.ingestion.user_agent,
         }
-        query = "(" + " OR ".join(f'"{k}"' for k in self.keywords[:3]) + ") lang:id -is:retweet"
-        params = {
-            "query": query,
-            "max_results": 100,
-            "tweet.fields": "created_at,public_metrics,author_id,lang",
-            "start_time": since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-
-        emitted = 0
         with httpx.Client(
             timeout=self.settings.ingestion.request_timeout_seconds, headers=headers
         ) as client:
-            next_token = None
-            while emitted < limit:
-                if next_token:
-                    params["next_token"] = next_token
-                try:
-                    response = client.get(self.ENDPOINT, params=params)
-                    response.raise_for_status()
-                    payload = response.json()
-                except Exception as exc:
-                    logger.warning("Twitter API request failed: %s", exc)
-                    return
+            yield from self._fetch_with(client, since, limit)
 
-                for tweet in payload.get("data", []):
-                    if emitted >= limit:
-                        return
-                    metrics = tweet.get("public_metrics", {})
-                    yield Document(
-                        source_platform=self.platform,
-                        source_name="x.com",
-                        external_id=tweet["id"],
-                        body=tweet.get("text"),
-                        url=f"https://x.com/i/status/{tweet['id']}",
-                        author=tweet.get("author_id"),
-                        published_at=_iso(tweet.get("created_at")),
-                        engagement={
-                            "likes": metrics.get("like_count", 0),
-                            "retweets": metrics.get("retweet_count", 0),
-                            "replies": metrics.get("reply_count", 0),
-                        },
-                        raw_payload={"collector": "twitter-api-v2"},
-                    )
-                    emitted += 1
+    def _fetch_with(self, client: Any, since: datetime, limit: int) -> Iterator[Document]:
+        params = self._search_params(since)
+        emitted = 0
+        while emitted < limit:
+            payload = self._page(client, params, first="next_token" not in params)
+            if payload is None:
+                return
 
-                next_token = payload.get("meta", {}).get("next_token")
-                if not next_token:
+            for tweet in payload.get("data", []):
+                if emitted >= limit:
                     return
+                yield self._tweet_document(tweet)
+                emitted += 1
+
+            next_token = payload.get("meta", {}).get("next_token")
+            if not next_token:
+                return
+            params["next_token"] = next_token
+
+    def _search_params(self, since: datetime) -> dict[str, Any]:
+        floor = self._now() - self.SEARCH_WINDOW
+        start = max(since.astimezone(timezone.utc), floor)
+        query = "(" + " OR ".join(f'"{k}"' for k in self.keywords[:3]) + ") lang:id -is:retweet"
+        return {
+            "query": query,
+            "max_results": self.MAX_RESULTS_PER_PAGE,
+            "tweet.fields": "created_at,public_metrics,author_id,lang",
+            "start_time": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def _page(self, client: Any, params: dict[str, Any], *, first: bool) -> dict | None:
+        """One search page. The first page's failure fails the run; a later
+        page's failure keeps the posts already collected."""
+        try:
+            response = client.get(self.ENDPOINT, params=params)
+        except Exception as exc:
+            if first:
+                raise RuntimeError(f"X API request failed: {exc}") from exc
+            logger.warning("X API request failed mid-pagination: %s", exc)
+            return None
+
+        if response.status_code == 200:  # noqa: PLR2004 - HTTP OK
+            return response.json()
+
+        message = f"X API HTTP {response.status_code}: {_x_error_reason(response)}"
+        if response.status_code in self.ACCESS_ERRORS:
+            raise ConnectorUnavailable(message)
+        if first:
+            raise RuntimeError(message)
+        logger.warning("%s (stopping pagination)", message)
+        return None
+
+    def _tweet_document(self, tweet: dict) -> Document:
+        metrics = tweet.get("public_metrics", {})
+        return Document(
+            source_platform=self.platform,
+            source_name="x.com",
+            external_id=tweet["id"],
+            body=tweet.get("text"),
+            url=f"https://x.com/i/status/{tweet['id']}",
+            author=tweet.get("author_id"),
+            published_at=_iso(tweet.get("created_at")),
+            engagement={
+                "likes": metrics.get("like_count", 0),
+                "retweets": metrics.get("retweet_count", 0),
+                "replies": metrics.get("reply_count", 0),
+            },
+            raw_payload={"collector": "twitter-api-v2"},
+        )
+
+
+def _x_error_reason(response: Any) -> str:
+    """X's own explanation of a refused request (``reason``/``title``/``detail``)."""
+    try:
+        body = response.json()
+    except Exception:
+        return response.text[:200]
+    if not isinstance(body, dict):
+        return str(body)[:200]
+    if body.get("errors") and not body.get("title"):
+        return "; ".join(str(e.get("message", e)) for e in body["errors"])[:300]
+    parts = [str(body[k]) for k in ("reason", "title", "detail") if body.get(k)]
+    return " - ".join(parts)[:300] or response.text[:200]
 
 
 def _iso(value: str | None) -> datetime | None:

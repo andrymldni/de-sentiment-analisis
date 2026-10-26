@@ -568,6 +568,72 @@ CARDS: list[dict] = [
             ORDER BY 3 ASC, 4 DESC NULLS LAST
         """,
     },
+    # --- Warehouse storage (platform view) --------------------------------
+    # These read the Postgres catalog rather than a mart: storage is a
+    # property of the warehouse itself, not of the data in it. Always "right
+    # now", so no date filter.
+    {
+        "key": "storage_total",
+        "name": "Ukuran Database Warehouse",
+        "description": (
+            "Total ukuran database warehouse (tabel + indeks + TOAST) saat ini. "
+            "Dipantau agar pertumbuhan data dan kebutuhan disk terlihat lebih awal."
+        ),
+        "display": "scalar",
+        "position": {"row": 56, "col": 0, "size_x": 6, "size_y": 6},
+        "sql": """
+            SELECT ROUND(pg_database_size(current_database()) / 1048576.0, 1) AS "Ukuran (MB)"
+        """,
+        "visualization_settings": {"scalar.suffix": " MB"},
+    },
+    {
+        "key": "storage_by_schema",
+        "name": "Ukuran per Schema",
+        "description": "Ruang disk per lapisan: raw (landing), core (output mesin), ops, dan model dbt.",
+        "display": "bar",
+        "position": {"row": 56, "col": 6, "size_x": 8, "size_y": 6},
+        "sql": """
+            SELECT
+                n.nspname                                                   AS "Schema",
+                ROUND(SUM(pg_total_relation_size(c.oid)) / 1048576.0, 2)    AS "Ukuran (MB)",
+                COUNT(*)                                                    AS "Jumlah Tabel"
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'm')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND n.nspname NOT LIKE 'pg_toast%'
+            GROUP BY 1
+            ORDER BY 2 DESC
+        """,
+        "visualization_settings": {
+            "graph.dimensions": ["Schema"],
+            "graph.metrics": ["Ukuran (MB)"],
+        },
+    },
+    {
+        "key": "storage_top_tables",
+        "name": "Tabel Terbesar",
+        "description": "20 tabel terbesar beserta porsi data vs indeks dan perkiraan jumlah baris.",
+        "display": "table",
+        "position": {"row": 56, "col": 14, "size_x": 10, "size_y": 6},
+        "sql": """
+            SELECT
+                n.nspname                                            AS "Schema",
+                c.relname                                            AS "Tabel",
+                ROUND(pg_total_relation_size(c.oid) / 1048576.0, 2)  AS "Total (MB)",
+                ROUND(pg_relation_size(c.oid) / 1048576.0, 2)        AS "Data (MB)",
+                ROUND(pg_indexes_size(c.oid) / 1048576.0, 2)         AS "Indeks (MB)",
+                COALESCE(s.n_live_tup, 0)                            AS "Perkiraan Baris"
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+            WHERE c.relkind IN ('r', 'm')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND n.nspname NOT LIKE 'pg_toast%'
+            ORDER BY pg_total_relation_size(c.oid) DESC
+            LIMIT 20
+        """,
+    },
 ]
 
 DASHBOARD_DESCRIPTION = (

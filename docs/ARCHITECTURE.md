@@ -45,7 +45,7 @@
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ METABASE — dashboard 19 kartu, di-provision otomatis lewat API           │
+│ METABASE — dashboard 22 kartu, di-provision otomatis lewat API           │
 └──────────────────────────────────────────────────────────────────────────┘
 
                Seluruhnya diorkestrasi Airflow (LocalExecutor)

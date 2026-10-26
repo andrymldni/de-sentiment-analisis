@@ -100,3 +100,17 @@ def test_date_filtered_cards_have_no_hard_coded_window():
         assert "CURRENT_DATE -" not in sql, card["key"]
         assert "NOW() -" not in sql, card["key"]
         assert "_90D" not in sql, card["key"]
+
+
+def test_dashboard_cards_fit_grid_without_overlap():
+    # Metabase silently stacks overlapping cards, hiding one of them.
+    occupied: dict[tuple[int, int], str] = {}
+    keys = [card["key"] for card in CARDS]
+    assert len(keys) == len(set(keys))
+    for card in CARDS:
+        pos = card["position"]
+        assert pos["col"] + pos["size_x"] <= 24, card["key"]
+        for row in range(pos["row"], pos["row"] + pos["size_y"]):
+            for col in range(pos["col"], pos["col"] + pos["size_x"]):
+                assert (row, col) not in occupied, (card["key"], occupied.get((row, col)))
+                occupied[(row, col)] = card["key"]
